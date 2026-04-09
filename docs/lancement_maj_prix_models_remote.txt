@@ -1,0 +1,1 @@
+python update_model_pricing.py votre_fichier.json -o votre_fichier_maj.json

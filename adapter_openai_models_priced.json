@@ -1,0 +1,494 @@
+{
+  "defaults": {
+    "base_url": "https://api.openai.com/v1",
+    "api_key_env": "OPENAI_API_KEY",
+    "temperature": 0.6,
+    "top_p": 0.9,
+    "max_tokens": 3000,
+    "use_responses_api": false,
+    "force_chat": true,
+    "timeout": 600
+  },
+  "models": {
+    "gpt-3.5-turbo": {
+      "use_responses_api": false,
+      "force_chat": true,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.5,
+        "cached_input": null,
+        "output": 1.5,
+        "source_type": "official_model_page",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-3.5-turbo",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "gpt-4": {
+      "use_responses_api": false,
+      "force_chat": true,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 30.0,
+        "cached_input": null,
+        "output": 60.0,
+        "source_type": "official_model_page",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-4",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "gpt-4-turbo": {
+      "use_responses_api": false,
+      "force_chat": true,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 10.0,
+        "cached_input": null,
+        "output": 30.0,
+        "source_type": "official_model_page",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-4-turbo",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "gpt-4o": {
+      "use_responses_api": false,
+      "force_chat": true,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 2.5,
+        "cached_input": 1.25,
+        "output": 10.0,
+        "source_type": "official_model_page",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-4o",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "gpt-4.1-nano": {
+      "use_responses_api": false,
+      "force_chat": true,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.1,
+        "cached_input": 0.025,
+        "output": 0.4,
+        "source_type": "official_model_page",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-4.1-nano",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "gpt-4o-mini": {
+      "use_responses_api": false,
+      "force_chat": true,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.15,
+        "cached_input": 0.075,
+        "output": 0.6,
+        "source_type": "official_model_page",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-4o-mini",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "gpt-4.1": {
+      "use_responses_api": true,
+      "force_chat": false,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 2.0,
+        "cached_input": 0.5,
+        "output": 8.0,
+        "source_type": "official_model_page",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-4.1",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "gpt-4.1-mini": {
+      "use_responses_api": true,
+      "force_chat": false,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.4,
+        "cached_input": 0.1,
+        "output": 1.6,
+        "source_type": "official_model_page",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-4.1-mini",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "o1-preview": {
+      "use_responses_api": true,
+      "force_chat": false,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 15.0,
+        "cached_input": 7.5,
+        "output": 60.0,
+        "source_type": "official_model_page",
+        "source_url": "https://developers.openai.com/api/docs/models/o1-preview",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "o1-mini": {
+      "use_responses_api": true,
+      "force_chat": false,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 1.1,
+        "cached_input": 0.55,
+        "output": 4.4,
+        "source_type": "official_model_page",
+        "source_url": "https://developers.openai.com/api/docs/models/o1-mini",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "openai/gpt-4o-mini": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.15,
+        "cached_input": null,
+        "output": 0.6,
+        "request": null,
+        "image": null,
+        "source_type": "openrouter_catalog",
+        "source_url": "https://openrouter.ai/api/v1/models",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "openai/gpt-4o": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 2.5,
+        "cached_input": 1.25,
+        "output": 10.0,
+        "request": null,
+        "image": null,
+        "source_type": "openrouter_catalog",
+        "source_url": "https://openrouter.ai/api/v1/models",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "openai/gpt-4.1-mini": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": true,
+      "force_chat": false,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.4,
+        "cached_input": 0.1,
+        "output": 1.6,
+        "request": null,
+        "image": null,
+        "source_type": "openrouter_catalog",
+        "source_url": "https://openrouter.ai/api/v1/models",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "gpt-5-mini": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "temperature": 0.2,
+      "top_p": 0.9,
+      "max_tokens": 4096,
+      "system": "",
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.25,
+        "cached_input": 0.025,
+        "output": 2.0,
+        "source_type": "official_pricing_page",
+        "source_url": "https://openai.com/api/pricing/",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "gpt-5": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "temperature": 0.2,
+      "use_responses_api": false,
+      "force_chat": true,
+      "top_p": 0.9,
+      "max_tokens": 4096,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 1.25,
+        "cached_input": 0.125,
+        "output": 10.0,
+        "source_type": "official_model_page",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-5",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "gpt-5-nano": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "use_responses_api": true,
+      "force_chat": false,
+      "temperature": 0.4,
+      "max_tokens": 4096,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.05,
+        "cached_input": null,
+        "output": null,
+        "source_type": "not_verified_in_current_sources",
+        "source_url": "https://openai.com/api/pricing/",
+        "checked_at": "2026-03-10",
+        "note": "Renseigner automatiquement via le script; la page de pricing consultée n'exposait pas clairement gpt-5-nano dans l'extrait exploitable."
+      }
+    },
+    "text-embedding-3-large": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "use_responses_api": false,
+      "force_chat": false,
+      "system": "Modèle d'embedding haute précision, utilisé pour l'indexation documentaire.",
+      "max_tokens": 512,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.13,
+        "cached_input": null,
+        "output": null,
+        "source_type": "official_model_page",
+        "source_url": "https://developers.openai.com/api/docs/models/text-embedding-3-large",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "openai/gpt-oss-120b": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "top_p": 0.9,
+      "max_tokens": 4096,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.039,
+        "cached_input": null,
+        "output": 0.19,
+        "request": null,
+        "image": null,
+        "source_type": "openrouter_catalog",
+        "source_url": "https://openrouter.ai/api/v1/models",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "anthropic/claude-sonnet-4.5": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": false,
+      "temperature": 0.2,
+      "force_chat": true,
+      "max_tokens": 4096,
+      "top_p": 0.8,
+      "system": "",
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 3.0,
+        "cached_input": null,
+        "output": 15.0,
+        "request": null,
+        "image": null,
+        "source_type": "openrouter_model_page",
+        "source_url": "https://openrouter.ai/anthropic/claude-sonnet-4.5",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "google/gemini-2.5-flash-preview-09-2025": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "max_tokens": 2500,
+      "top_p": 0.8,
+      "system": "",
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.1,
+        "cached_input": null,
+        "output": 0.4,
+        "audio": 0.3,
+        "request": null,
+        "image": null,
+        "source_type": "openrouter_model_page",
+        "source_url": "https://openrouter.ai/google/gemini-2.5-flash-preview-09-2025",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "google/gemini-2.5-flash-lite": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "max_tokens": 2500,
+      "top_p": 0.8,
+      "system": "",
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.1,
+        "cached_input": null,
+        "output": 0.4,
+        "audio": 0.3,
+        "request": null,
+        "image": null,
+        "source_type": "openrouter_model_page",
+        "source_url": "https://openrouter.ai/google/gemini-2.5-flash-lite",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "meta-llama/llama-4-maverick": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "max_tokens": 4000,
+      "top_p": 0.8,
+      "system": "",
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.15,
+        "cached_input": null,
+        "output": 0.6,
+        "request": null,
+        "image": null,
+        "source_type": "openrouter_model_page",
+        "source_url": "https://openrouter.ai/meta-llama/llama-4-maverick",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "meta-llama/llama-4-scout": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "max_tokens": 4000,
+      "top_p": 0.8,
+      "system": "",
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.08,
+        "cached_input": null,
+        "output": 0.3,
+        "request": null,
+        "image": null,
+        "source_type": "openrouter_model_page",
+        "source_url": "https://openrouter.ai/meta-llama/llama-4-scout",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "google/gemini-flash-1.5": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "max_tokens": 2000,
+      "system": "Assistant d'analyse juridique rapide et concis. Tu produis des résumés factuels clairs, sans interprétation inutile.",
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": null,
+        "cached_input": null,
+        "output": null,
+        "request": null,
+        "image": null,
+        "source_type": "to_refresh_via_script",
+        "source_url": "https://openrouter.ai/api/v1/models",
+        "checked_at": "2026-03-10",
+        "note": "Le modèle est visible sur OpenRouter, mais le prix n'était pas récupérable de façon suffisamment fiable dans les extraits consultés."
+      }
+    },
+    "perplexity/sonar-deep-research": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "temperature": 0.5,
+      "max_tokens": 2500,
+      "system": "",
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 2.0,
+        "cached_input": null,
+        "output": 8.0,
+        "request": null,
+        "image": null,
+        "web_search_per_1k_calls": 5.0,
+        "source_type": "openrouter_model_page",
+        "source_url": "https://openrouter.ai/perplexity/sonar-deep-research",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "deepseek/deepseek-v3.2-exp": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "temperature": 0.35,
+      "max_tokens": 2500,
+      "system": "",
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.27,
+        "cached_input": null,
+        "output": 0.41,
+        "request": null,
+        "image": null,
+        "source_type": "openrouter_model_page",
+        "source_url": "https://openrouter.ai/deepseek/deepseek-v3.2-exp",
+        "checked_at": "2026-03-10"
+      }
+    },
+    "mistralai/mistral-7b-instruct": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.2,
+        "cached_input": null,
+        "output": 0.2,
+        "request": null,
+        "image": null,
+        "source_type": "openrouter_model_page",
+        "source_url": "https://openrouter.ai/mistralai/mistral-7b-instruct",
+        "checked_at": "2026-03-10"
+      }
+    }
+  }
+}

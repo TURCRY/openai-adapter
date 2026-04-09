@@ -1,0 +1,188 @@
+networks:
+  data-net:
+    external: true    # réseau partagé existant (paperless, langfuse, etc.)
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+    networks: [data-net]
+    environment:
+      TZ: Europe/Paris 
+    volumes:
+      - /volume1/home/nicolas/Docker/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    # Monte limiter.toml quand tu activeras le limiter (facultatif pour l’instant)
+    #    - /volume1/home/nicolas/Docker/searxng/limiter.toml:/etc/searxng/limiter.toml:ro
+    ports:
+      - "192.168.1.20:8080:8080"      # LAN
+      - "10.0.1.1:8080:8080"          # VPN
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:alpine
+    container_name: searxng-redis
+    restart: unless-stopped
+    networks: [data-net]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+
+
+  # 🟩 Interface principale OpenWebUI
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:v0.8.9
+    container_name: openwebui
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "3000:8080"
+    environment:
+      TZ: Europe/Paris
+      WEBUI_AUTH: "False"
+      WEBUI_SECRET_KEY: "euTPk0E5s0ubhkMkKs9L"
+
+      # --- Configuration Provider OpenAI-compatible ---
+      DEFAULT_OPENAI_API_BASE_URL: "http://openai-adapter:5055/v1"
+      DEFAULT_OPENAI_API_KEY: "*CRpy#VrWz#5zh&F%ww6zY24U"
+
+
+      # Pour compatibilité UI : une seule base
+      OPENAI_API_BASE_URLS: "http://openai-adapter:5055/v1"
+      OPENAI_API_KEYS: "*CRpy#VrWz#5zh&F%ww6zY24U"
+      OPENAI_API_BASE_URL: "http://openai-adapter:5055/v1"
+      OPENAI_API_KEY: "*CRpy#VrWz#5zh&F%ww6zY24U"
+      USER_AGENT: "openwebui/0.8.9"
+
+    # --- Désactivation des autres providers (évite les logs parasites Ollama/OpenRouter) ---
+      ENABLE_OLLAMA: "0"
+      ENABLE_OPENROUTER: "0"
+      ENABLE_LOCALAI: "0"
+      ENABLE_FORWARD_USER_INFO_HEADERS: "true"
+
+    volumes:
+      - /volume1/Docker/openwebui:/app/backend/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks: [data-net]
+    depends_on: 
+      - openai-adapter
+          
+    # 🟦 Passerelle OpenAI → Flask PC-fixe
+  openai-adapter:
+    image: openai-adapter:local
+    container_name: openai-adapter
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports: ["5055:5055"]
+    volumes:
+      - /volume1/home/nicolas/Docker/openai-adapter:/app
+      - /volume1/home/nicolas/Docker/openai-adapter/config_remote.json:/config/config_remote.json:ro
+    environment:
+      TZ: Europe/Paris
+
+      # Auth & routing
+      ADAPTER_API_KEY: ${ADAPTER_API_KEY}
+      PORT: "5055"
+      REMOTE_CONF_PATH: "/config/config_remote.json"
+
+      # providers distants 
+
+       # Provider distant OpenAI (clé "sk-…" RÉELLE)
+
+      # Défaut global = OpenAI (les overrides par modèle priment)
+      REMOTE_BASE: "https://api.openai.com/v1"
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      REMOTE_API_KEY: ${OPENAI_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+
+      # Modèles exposés à OpenWebUI (tous, OpenAI + OpenRouter)
+      REMOTE_MODELS: "gpt-5-mini,gpt-5,gpt-5-nano,openai/gpt-oss-120b,text-embedding-3-large,anthropic/claude-sonnet-4.5,google/gemini-2.5-flash-preview-09-2025,google/gemini-2.0-flash-exp:free,meta-llama/llama-4-maverick:free,meta-llama/llama-4-scout:free,google/gemini-flash-1.5,perplexity/sonar-deep-research,deepseek/deepseek-v3.2-exp"
+      FALLBACK_REMOTE_MODEL: "gpt-4o-mini"
+
+      # gestion modeles OpenAi       # Désactiver l'API Responses et forcer chat/completions :
+      OPENAI_USE_RESPONSES: "false"
+      OPENAI_FORCE_CHAT: "true"
+      OPENAI_COMPAT_MODE: "chat"  # (selon image)
+      # Pour débug
+      LOG_LEVEL: "DEBUG"
+
+      # Local d'abord pour embeddings (RGPD), puis OpenAI en dernier ressort
+      EMBEDDINGS_PROVIDER: "local"
+      EMBEDDINGS_MODEL: "Nomic_Embed"
+      FALLBACK_LOCAL_EMBEDDINGS_MODEL: "E5_multilingual_large"
+      FALLBACK_EMBEDDINGS_MODEL: "text-embedding-3-small"   # OpenAI (OpenRouter n'a pas d’embeddings)
+      
+      # RGPD des embedding
+      FALLBACK_ON_LOCAL_FAILURE:  "1"   # mettre 0 pour bloquer l'embedding en remote
+      PREFER_LOCAL_EMBEDDINGS:    "1"   # (par défaut 1, ici informatif)
+      ALLOW_REMOTE_EMBEDDINGS:    "0"   # idem, purement informatif
+
+      # WOL / timeouts (tes valeurs)
+      LOCAL_BASE: "http://10.0.1.10:5050" # IP du PC-fixe dans OpenVPN
+      LOCAL_API_KEY: "hy^wQ#4d3HpnEl4x1Mg&"
+      ENABLE_WOL: "1"
+      URL_HAY_PUBLIQUE: "9qlvntfslnr137ruj4pk4ivcautsyd9c.ui.nabu.casa"
+      WEBHOOK_WAKE_PCFIXE: "reveil-pc-via-webhook-KCJ_ZGqjEwdSw_uGx21xd0lL"
+      
+
+      CONNECT_TIMEOUT: "20"
+      READ_TIMEOUT: "60"
+      PING_READ_TIMEOUT: "10"
+      WAIT_READY_SECS: "300"
+      WAIT_SLEEP_SEC: "5"
+      PING_INTERVAL: "10800"
+
+
+      LLM_TIMEOUT: "900"
+      LLM_INIT_TIMEOUT: "1500"
+      REMOTE_API_TIMEOUT: "600"
+      OCR_TIMEOUT: "3900" 
+
+      # --- CORS (accès uniquement depuis OpenWebUI) ---
+      ALLOW_CREDENTIALS: "0"
+
+      # RAG délégué à Flask
+      RAG_MODE: "off"
+
+      # Modèles locaux exposés
+      LOCAL_MODELS: "local-mistral,local-gpt-oss_20B,local-llama3,local-llama2,local-gemma,local-phi2,local-embed,local-voxtral-mini,local-voxtral-large,local-ocr,local-Falcon3_10B,local-DeepSeek_R1_7B,local-SmallThinker_3B,local-MiniCPM_V_2_6,annoter,annoter_rag,annoter_rag_vecteur,annoter_web"
+      DISCOVER_LOCAL_MODELS: "1"
+      LOCAL_DISCOVERY_PATH: "/models"     # ou l’endpoint Flask réel
+      LOCAL_PING_PATH: "/ping"
+      
+      # Vector stores (optionnels)
+      # QDRANT_URL: "http://10.0.1.10:6333"
+      # QDRANT_API_KEY: "jqZVE2S!3vw9Nmmfe!xy"
+      # QDRANT_COLLECTION: "my_docs"
+      # CHROMA_URL: "http://10.0.1.10:8800"         # ton PC (port publié 8800)
+      # CHROMA_COLLECTION: "my_docs"
+      # RAG_TOP_K: "4"
+    command: >
+      uvicorn adapter:app --host 0.0.0.0 --port ${PORT:-5055} --timeout-keep-alive 60
+    restart: unless-stopped
+    networks: [data-net]
