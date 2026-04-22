@@ -1560,15 +1560,32 @@ async def _remote_chat(
         j = r.json() or {}
 
         content = None
+        finish_reason = ""
         if isinstance(j.get("choices"), list) and j["choices"]:
             ch0 = j["choices"][0] or {}
             msg0 = ch0.get("message") or {}
-            content = msg0.get("content") or ch0.get("text")
+            finish_reason = str(ch0.get("finish_reason") or "").strip().lower()
+            content = msg0.get("content")
+            if content is None:
+                content = ch0.get("text")
+
+        content_str = "" if content is None else str(content)
+
+        if finish_reason == "length" and not content_str.strip():
+            log.warning(
+                "[remote_chat] upstream truncated with empty content model=%s finish_reason=%s",
+                model,
+                finish_reason,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="Upstream truncated: finish_reason=length with empty content",
+            )
 
         if content is None:
             return str(j)
 
-        content = str(content)
+        content = content_str
 
         # règle spéciale "pass3_" : forcer JSON
         if model.startswith("pass3_"):
