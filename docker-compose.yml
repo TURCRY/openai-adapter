@@ -143,7 +143,8 @@ services:
       ALLOW_REMOTE_EMBEDDINGS:    "0"   # idem, purement informatif
 
       # WOL / timeouts (tes valeurs)
-      LOCAL_BASE: "http://10.0.1.10:5050" # IP du PC-fixe dans OpenVPN
+      LOCAL_LLM_BASE: "http://10.0.1.2:5050"
+      FLASK_BACKEND_CANDIDATES: "http://10.0.1.2:5050,http://10.0.1.10:5050,http://192.168.0.155:5050"
       LOCAL_API_KEY: "hy^wQ#4d3HpnEl4x1Mg&"
       ENABLE_WOL: "1"
       URL_HAY_PUBLIQUE: "9qlvntfslnr137ruj4pk4ivcautsyd9c.ui.nabu.casa"
@@ -176,10 +177,10 @@ services:
       LOCAL_PING_PATH: "/ping"
       
       # Vector stores (optionnels)
-      # QDRANT_URL: "http://10.0.1.10:6333"
+      # QDRANT_URL: "http://<backend-flask>:6333"
       # QDRANT_API_KEY: "jqZVE2S!3vw9Nmmfe!xy"
       # QDRANT_COLLECTION: "my_docs"
-      # CHROMA_URL: "http://10.0.1.10:8800"         # ton PC (port publié 8800)
+      # CHROMA_URL: "http://<backend-flask>:8800"         # ton PC (port publié 8800)
       # CHROMA_COLLECTION: "my_docs"
       # RAG_TOP_K: "4"
     command: >

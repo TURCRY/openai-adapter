@@ -22,6 +22,8 @@ import random
 from hashlib import sha256
 from uuid import uuid4
 
+from backend_selection import normalize_backend_url, parse_backend_candidates, select_backend_url
+
 
 # -----------------------------------------------------------------------------
 # Log
@@ -41,7 +43,7 @@ for name in ("adapter", "httpx", "uvicorn.error", "uvicorn.access"):
 log = logging.getLogger("adapter")
 logger = log
 log.info(f"🔧 LOG_LEVEL défini sur {LOG_LEVEL}")
-log.info("ADAPTER BUILD MARKER 2026-03-08-A")
+log.info("ADAPTER BUILD MARKER 2026-05-24-pass1-schema-strict")
 
 # -----------------------------------------------------------------------------
 # App & CORS
@@ -133,6 +135,7 @@ COMFY_PREFIX = "/comfyui"
 # -----------------------------------------------------------------------------
 # Config de base & Providers
 # -----------------------------------------------------------------------------
+
 ADAPTER_API_KEY = os.getenv("ADAPTER_API_KEY", "")
 
 # Provider 1 (principal) – ex: OpenRouter
@@ -174,7 +177,22 @@ CHROMA_URL = os.getenv("CHROMA_URL", "")
 CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "")
 
 # Serveur local (Flask)
-LOCAL_BASE = os.getenv("LOCAL_BASE", "http://10.0.1.10:5050")
+DEFAULT_FLASK_BACKEND_CANDIDATES = (
+    "http://10.0.1.10:5050,"
+    "http://10.0.1.2:5050,"
+    "http://192.168.0.155:5050"
+)
+CONFIGURED_LOCAL_BASE = (
+    os.getenv("LOCAL_LLM_BASE", "")
+    or os.getenv("FLASK_BACKEND_URL", "")
+    or os.getenv("LOCAL_BASE", "")
+).strip()
+FLASK_BACKEND_CANDIDATES = os.getenv(
+    "FLASK_BACKEND_CANDIDATES",
+    DEFAULT_FLASK_BACKEND_CANDIDATES,
+)
+LOCAL_BACKEND_CANDIDATES = parse_backend_candidates(CONFIGURED_LOCAL_BASE, FLASK_BACKEND_CANDIDATES)
+LOCAL_BASE = LOCAL_BACKEND_CANDIDATES[0] if LOCAL_BACKEND_CANDIDATES else ""
 LOCAL_API_KEY = os.getenv("LOCAL_API_KEY", "")
 LOCAL_PING_PATH = os.getenv("LOCAL_PING_PATH", "/ping")
 
@@ -239,6 +257,41 @@ _ping_lock = asyncio.Lock()
 # Client HTTP partagé
 HTTP_LIMITS = Limits(max_connections=100, max_keepalive_connections=20)
 _http = httpx.AsyncClient(limits=HTTP_LIMITS, timeout=TIMEOUT_PING)
+
+
+async def _probe_backend_ping(base_url: str, ping_path: str, headers: dict[str, str] | None = None) -> tuple[bool, str]:
+    url = f"{normalize_backend_url(base_url)}{ping_path}"
+    try:
+        r = await _http.get(url, headers=headers or {}, timeout=TIMEOUT_PING)
+        if r.status_code == 200:
+            return True, "HTTP 200"
+        return False, f"HTTP {r.status_code}"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+async def configure_local_backend_from_candidates() -> None:
+    global LOCAL_BASE, _last_ping_ok_ts
+    configured_display = CONFIGURED_LOCAL_BASE or "(non definie)"
+    log.info("Backend Flask configure: %s", configured_display)
+    log.info("Backend Flask candidats: %s", ", ".join(LOCAL_BACKEND_CANDIDATES) or "(aucun)")
+    selected, attempts = await select_backend_url(
+        LOCAL_BACKEND_CANDIDATES,
+        ping_path=LOCAL_PING_PATH,
+        headers=_llm_headers(),
+        probe=_probe_backend_ping,
+    )
+    for attempt in attempts:
+        if attempt["ok"] == "true":
+            log.info("Backend Flask candidat OK: %s (%s)", attempt["url"], attempt["detail"])
+        else:
+            log.warning("Backend Flask candidat KO: %s (%s)", attempt["url"], attempt["detail"])
+    if selected:
+        LOCAL_BASE = selected
+        _last_ping_ok_ts = time.monotonic()
+        log.info("Backend Flask retenu: %s", LOCAL_BASE)
+        return
+    log.error("Aucun backend Flask candidat ne repond a %s. URL conservee: %s", LOCAL_PING_PATH, LOCAL_BASE or "(aucune)")
 
 @app.on_event("shutdown")
 async def _shutdown_http_client():
@@ -720,28 +773,47 @@ def _canonical_uses_structured_outputs(canonical: str) -> bool:
     return False
 
 
-def _pass1_response_format() -> dict:
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "segment_annotation",
-            "strict": True,
-            "schema": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "segment_id": {
-                        "type": "string"
-                    },
-                    "sujets": {
-                        "type": "object",
-                        "additionalProperties": False
-                    }
-                },
-                "required": ["segment_id", "sujets"]
-            }
-        }
-    }
+def _enforce_schema_additional_properties_false(node: Any) -> Any:
+    if isinstance(node, dict):
+        if node.get("type") == "object":
+            node["additionalProperties"] = False
+        for key in ("properties", "patternProperties", "$defs", "definitions"):
+            child_map = node.get(key)
+            if isinstance(child_map, dict):
+                for child in child_map.values():
+                    _enforce_schema_additional_properties_false(child)
+        items = node.get("items")
+        if isinstance(items, dict):
+            _enforce_schema_additional_properties_false(items)
+        elif isinstance(items, list):
+            for child in items:
+                _enforce_schema_additional_properties_false(child)
+        for key in ("oneOf", "anyOf", "allOf"):
+            variants = node.get(key)
+            if isinstance(variants, list):
+                for child in variants:
+                    _enforce_schema_additional_properties_false(child)
+    return node
+
+
+def _stricten_response_format(response_format: dict | None) -> dict | None:
+    if not isinstance(response_format, dict):
+        return response_format
+    cloned = json.loads(json.dumps(response_format, ensure_ascii=False))
+    schema = ((cloned.get("json_schema") or {}).get("schema")) if isinstance(cloned.get("json_schema"), dict) else None
+    if isinstance(schema, dict):
+        _enforce_schema_additional_properties_false(schema)
+    return cloned
+
+
+def _response_format_marker(response_format: dict | None) -> str:
+    if not response_format:
+        return "none"
+    payload = json.dumps(response_format, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+log.info("PASS1 response_format disabled: prompt JSON strict + local validation")
 
 
 # -----------------------------------------------------------------------------
@@ -1453,7 +1525,9 @@ async def _remote_chat(
                 p["max_output_tokens"] = max_tokens
 
             log.debug("POST %s keys=%s", f"{base}/responses", sorted(p.keys()))
+            upstream_t0 = time.monotonic()
             r = await client.post(f"{base}/responses", json=p, headers=headers)
+            upstream_elapsed = time.monotonic() - upstream_t0
 
             # retry si 400 sur sampling
             if r.status_code == 400 and include_sampling:
@@ -1464,7 +1538,9 @@ async def _remote_chat(
                         p.pop("temperature", None)
                         p.pop("top_p", None)
                         log.debug("Retry /responses without temperature/top_p keys=%s", sorted(p.keys()))
+                        upstream_t0 = time.monotonic()
                         r = await client.post(f"{base}/responses", json=p, headers=headers)
+                        upstream_elapsed = time.monotonic() - upstream_t0
                 except Exception:
                     pass
             try:
@@ -1482,6 +1558,15 @@ async def _remote_chat(
                 )
 
             j = r.json() or {}
+            usage = j.get("usage") if isinstance(j, dict) else None
+            log.info(
+                "[remote_chat] upstream responses done logical=%s physical=%s status=%s elapsed=%.3fs usage=%s",
+                model,
+                model_norm,
+                j.get("status"),
+                upstream_elapsed,
+                usage,
+            )
 
             if j.get("status") == "incomplete":
                 raise HTTPException(status_code=502, detail="OpenAI Responses returned status=incomplete")
@@ -1516,13 +1601,24 @@ async def _remote_chat(
         # json mode / structured outputs
         if prov == "openai":
             if response_format is not None:
-                payload["response_format"] = response_format
+                payload["response_format"] = _stricten_response_format(response_format)
+                rf_name = ((payload["response_format"].get("json_schema") or {}).get("name")
+                           if isinstance(payload["response_format"], dict) else None)
+                log.info(
+                    "[remote_chat] response_format logical=%s physical=%s name=%s marker=%s",
+                    model,
+                    model_norm,
+                    rf_name,
+                    _response_format_marker(payload["response_format"]),
+                )
             elif cfg.get("json_mode", False):
                 payload["response_format"] = {"type": "json_object"}
 
 
         log.debug("POST %s keys=%s", f"{base}/chat/completions", sorted(payload.keys()))
+        upstream_t0 = time.monotonic()
         r = await client.post(f"{base}/chat/completions", json=payload, headers=headers)
+        upstream_elapsed = time.monotonic() - upstream_t0
 
         # Retry automatique si 400 sur sampling (temp/top_p)
         if r.status_code == 400 and prov == "openai":
@@ -1538,7 +1634,9 @@ async def _remote_chat(
                         "Retry /chat/completions without temperature/top_p keys=%s",
                         sorted(payload.keys())
                     )
+                    upstream_t0 = time.monotonic()
                     r = await client.post(f"{base}/chat/completions", json=payload, headers=headers)
+                    upstream_elapsed = time.monotonic() - upstream_t0
             except Exception:
                 pass
 
@@ -1568,6 +1666,15 @@ async def _remote_chat(
             content = msg0.get("content")
             if content is None:
                 content = ch0.get("text")
+        usage = j.get("usage") if isinstance(j, dict) else None
+        log.info(
+            "[remote_chat] upstream chat done logical=%s physical=%s elapsed=%.3fs finish_reason=%s usage=%s",
+            model,
+            model_norm,
+            upstream_elapsed,
+            finish_reason,
+            usage,
+        )
 
         content_str = "" if content is None else str(content)
 
@@ -1604,6 +1711,8 @@ async def _startup_discovery():
     global LOCAL_MODELS, _AVAILABLE_LOCAL_IDS
     if getattr(app.state, "discovered", False):
         return
+
+    await configure_local_backend_from_candidates()
 
     # 1) attendre que le Flask réponde à /ping (ou /models à défaut)
     await _wait_local_ready()  # ← nouvelle fonction ci-dessous
@@ -1751,12 +1860,20 @@ async def _remote_chat_with_retry(
     last_exc = None
 
     for attempt in range(1, retries + 2):
+        attempt_t0 = time.monotonic()
         try:
             raw = await _remote_chat(
                 messages,
                 model_name,
                 temperature,
                 response_format=response_format,
+            )
+            log.info(
+                "[remote_chat_with_retry] OK model=%s attempt=%s/%s elapsed=%.3fs",
+                model_name,
+                attempt,
+                retries + 1,
+                time.monotonic() - attempt_t0,
             )
             # IMPORTANT : raw vide => on force une erreur transitoire pour fallback/retry
             if _is_effectively_empty_raw(raw):
@@ -1767,7 +1884,15 @@ async def _remote_chat_with_retry(
         # timeouts réseau
         except (httpx.TimeoutException, httpcore.ReadTimeout, httpcore.ConnectTimeout) as e:
             last_exc = e
-            log.warning(f"[annoter_segments] timeout remote model={model_name} attempt={attempt}/{retries+1}: {type(e).__name__}: {e}")
+            log.warning(
+                "[remote_chat_with_retry] timeout model=%s attempt=%s/%s elapsed=%.3fs err=%s: %s",
+                model_name,
+                attempt,
+                retries + 1,
+                time.monotonic() - attempt_t0,
+                type(e).__name__,
+                e,
+            )
 
         # IMPORTANT : ton _remote_chat() remonte des HTTPException(502, detail=...)
         except HTTPException as e:
@@ -1787,7 +1912,15 @@ async def _remote_chat_with_retry(
             if code not in (429, 500, 502, 503, 504):
                 raise
 
-            log.warning(f"[annoter_segments] transient HTTPException {code} model={model_name} attempt={attempt}/{retries+1} detail={str(detail)[:200]}")
+            log.warning(
+                "[remote_chat_with_retry] transient HTTPException code=%s model=%s attempt=%s/%s elapsed=%.3fs detail=%s",
+                code,
+                model_name,
+                attempt,
+                retries + 1,
+                time.monotonic() - attempt_t0,
+                str(detail)[:200],
+            )
 
         # éventuellement attraper les erreurs httpx non encapsulées (au cas où)
         except httpx.HTTPStatusError as e:
@@ -1801,7 +1934,14 @@ async def _remote_chat_with_retry(
 
             # Retryable
             if sc in (429, 500, 502, 503, 504):
-                log.warning(f"[annoter_segments] httpx {sc} model={model_name} attempt={attempt}/{retries+1}")
+                log.warning(
+                    "[remote_chat_with_retry] httpx status=%s model=%s attempt=%s/%s elapsed=%.3fs",
+                    sc,
+                    model_name,
+                    attempt,
+                    retries + 1,
+                    time.monotonic() - attempt_t0,
+                )
             else:
                 raise
 
@@ -1954,6 +2094,7 @@ class ChatReq(BaseModel):
     temperature: float | None = None
     stream: bool | None = None
     metadata: dict | None = None
+    response_format: dict | None = None
 
 class ChatRespChoice(BaseModel):
     index: int
@@ -2053,6 +2194,7 @@ async def chat_completions(
     messages   = [m.model_dump() for m in req.messages]
     temperature = req.temperature
     meta       = req.metadata or {}
+    requested_response_format = req.response_format
     log.info("[chat] meta_keys=%s", sorted(list((meta or {}).keys())))
     for k in ("conversation_id", "chat_id", "thread_id", "id"):
         if k in (meta or {}):
@@ -2185,7 +2327,7 @@ async def chat_completions(
 
                 response_format = None
                 if _canonical_uses_structured_outputs(canonical):
-                    response_format = _pass1_response_format()
+                    response_format = None
 
                 try:
                     raw = await _remote_chat_with_retry(
@@ -2357,6 +2499,7 @@ async def chat_completions(
                 messages=messages,
                 model=canonical,
                 temperature=temperature,
+                response_format=requested_response_format,
             )
             content = raw
         except Exception as e:
