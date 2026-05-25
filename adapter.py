@@ -383,7 +383,9 @@ MODEL_REGISTRY = {
         "backend": "openai",
         "api_base": "https://api.openai.com/v1",
         "api_key_env": "OPENAI_API_KEY",
-        "model": "gpt-5-mini",
+        # Benchmark A60: gpt-4.1-mini retenu pour report_remote en exploitation normale;
+        # gpt-5-mini conserve en variante plus lente.
+        "model": "gpt-4.1-mini",
         "json_mode": True, 
     },
     "report_remote_alt": {
