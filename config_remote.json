@@ -292,6 +292,24 @@
         "checked_at": "2026-03-10"
       }       
     },
+    "minimaxai/minimax-m2.7": {
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "api_key_env": "BUILD_NVDIA_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 0.15,
+        "cached_input": null,
+        "output": 0.6,
+        "request": null,
+        "image": null,
+        "source_type": "openrouter_catalog",
+        "source_url": "https://openrouter.ai/api/v1/models",
+        "checked_at": "2026-03-10"
+      }
+    },
     "text-embedding-3-large": {
       "base_url": "https://api.openai.com/v1",
       "api_key_env": "OPENAI_API_KEY",
