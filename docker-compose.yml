@@ -41,6 +41,21 @@ services:
         max-file: "3"
 
 
+  perplexica:
+    image: itzcrazykns1337/perplexica:slim-latest
+    container_name: perplexica
+    restart: unless-stopped
+    networks: [data-net]
+    ports:
+      - "3080:3000"
+    environment:
+      TZ: Europe/Paris
+      SEARXNG_API_URL: "http://searxng:8080"
+    volumes:
+      - /volume1/Docker/perplexica:/home/perplexica/data
+    depends_on:
+      - searxng
+      - openai-adapter
 
   # 🟩 Interface principale OpenWebUI
   openwebui:
