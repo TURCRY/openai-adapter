@@ -158,8 +158,8 @@ services:
       ALLOW_REMOTE_EMBEDDINGS:    "0"   # idem, purement informatif
 
       # WOL / timeouts (tes valeurs)
-      LOCAL_LLM_BASE: "http://192.168.0.120:5050"
-      FLASK_BACKEND_CANDIDATES: "http://192.168.0.120:5050,http://192.168.0.155:5050,http://10.0.1.10:5050"
+      LOCAL_LLM_BASE: "http://10.0.1.10:5050"
+      FLASK_BACKEND_CANDIDATES: "http://10.0.1.10:5050,http://192.168.0.120:5050,http://192.168.0.155:5050"
       LOCAL_API_KEY: "hy^wQ#4d3HpnEl4x1Mg&"
       ENABLE_WOL: "1"
       URL_HAY_PUBLIQUE: "9qlvntfslnr137ruj4pk4ivcautsyd9c.ui.nabu.casa"
