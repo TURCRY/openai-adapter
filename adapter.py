@@ -252,6 +252,7 @@ DEFAULT_LOCAL_MIN_PROMPT_TOKENS = 512 # valeur par défaut
 # Ping throttling
 _last_ping_ok_ts = 0.0
 _ping_lock = asyncio.Lock()
+_backend_reselect_lock = asyncio.Lock()
 
 
 # Client HTTP partagé
@@ -293,6 +294,68 @@ async def configure_local_backend_from_candidates() -> None:
         return
     log.error("Aucun backend Flask candidat ne repond a %s. URL conservee: %s", LOCAL_PING_PATH, LOCAL_BASE or "(aucune)")
 
+
+def _is_retryable_local_failure(exc: Exception) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        return bool(status and status >= 500)
+    if isinstance(exc, (httpx.TimeoutException, httpx.RequestError)):
+        return True
+    name = type(exc).__name__.lower()
+    return "timeout" in name or "connect" in name or "network" in name
+
+
+async def _reselect_local_backend(reason: str) -> bool:
+    global LOCAL_BASE, _last_ping_ok_ts
+    async with _backend_reselect_lock:
+        old_base = LOCAL_BASE
+        ordered_candidates = [u for u in LOCAL_BACKEND_CANDIDATES if u != old_base]
+        if old_base:
+            ordered_candidates.append(old_base)
+        log.warning(
+            "Backend Flask runtime fallback: cause=%s old=%s candidates=%s",
+            reason,
+            old_base or "(aucun)",
+            ", ".join(ordered_candidates) or "(aucun)",
+        )
+        selected, attempts = await select_backend_url(
+            ordered_candidates,
+            ping_path=LOCAL_PING_PATH,
+            headers=_llm_headers(),
+            probe=_probe_backend_ping,
+        )
+        for attempt in attempts:
+            if attempt["ok"] == "true":
+                log.info("Backend Flask runtime candidat OK: %s (%s)", attempt["url"], attempt["detail"])
+            else:
+                log.warning("Backend Flask runtime candidat KO: %s (%s)", attempt["url"], attempt["detail"])
+        if not selected:
+            log.error("Backend Flask runtime fallback impossible: aucun candidat OK apres cause=%s old=%s", reason, old_base or "(aucun)")
+            return False
+        LOCAL_BASE = selected
+        _last_ping_ok_ts = time.monotonic()
+        log.warning("Backend Flask runtime fallback retenu: old=%s new=%s cause=%s", old_base or "(aucun)", LOCAL_BASE, reason)
+        return True
+
+
+async def _local_request_once_with_runtime_fallback(method: str, path: str, *, timeout: httpx.Timeout | float, **kwargs) -> httpx.Response:
+    base = LOCAL_BASE
+    url = f"{base}{path}"
+    try:
+        r = await _http.request(method, url, timeout=timeout, **kwargs)
+        r.raise_for_status()
+        return r
+    except Exception as exc:
+        if not _is_retryable_local_failure(exc):
+            raise
+        reason = f"{type(exc).__name__}: {exc}"
+        if not await _reselect_local_backend(reason):
+            raise HTTPException(status_code=502, detail=f"Local Flask backend unavailable after runtime fallback: {reason}") from exc
+        retry_url = f"{LOCAL_BASE}{path}"
+        log.warning("Backend Flask runtime retry: method=%s path=%s old=%s new=%s cause=%s", method, path, base or "(aucun)", LOCAL_BASE, reason)
+        r = await _http.request(method, retry_url, timeout=timeout, **kwargs)
+        r.raise_for_status()
+        return r
 @app.on_event("shutdown")
 async def _shutdown_http_client():
     await _http.aclose()
@@ -2049,8 +2112,7 @@ async def _local_chat(
         )
 
 
-        r = await _http.post(url, json=payload, headers=headers, timeout=TIMEOUT_LOCAL)
-        r.raise_for_status()
+        r = await _local_request_once_with_runtime_fallback("POST", path, timeout=TIMEOUT_LOCAL, json=payload, headers=headers)
         j = r.json()
 
 
@@ -2064,8 +2126,7 @@ async def _local_chat(
 
 
     except (httpx.ReadTimeout, httpx.ConnectTimeout):
-        r = await _http.post(url, json=payload, headers=headers, timeout=TIMEOUT_INIT)
-        r.raise_for_status()
+        r = await _local_request_once_with_runtime_fallback("POST", path, timeout=TIMEOUT_INIT, json=payload, headers=headers)
         j = r.json()
         if isinstance(j, dict):
             if meta.get("return_html"):
