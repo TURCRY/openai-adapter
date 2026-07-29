@@ -451,6 +451,13 @@ MODEL_REGISTRY = {
         "model": "gpt-4.1-mini",
         "json_mode": True, 
     },
+    "report_debrief_remote": {
+        "backend": "openai",
+        "api_base": "https://api.openai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
+        "model": "gpt-4.1-mini",
+        "json_mode": True,
+    },
     "report_remote_alt": {
         "backend": "openai",
         "api_base": "https://api.openai.com/v1",
@@ -1044,6 +1051,9 @@ def _fallback_chain_for(canonical: str) -> list[str]:
     if canonical == "report_remote":
         return ["report_remote", "report_remote_alt", "report_remote_alt2"]
 
+    if canonical == "report_debrief_remote":
+        return ["report_debrief_remote"]
+
     if canonical == "report_remote_alt":
         return ["report_remote_alt", "report_remote_alt2"]
     
@@ -1293,6 +1303,26 @@ def _fallback_json_for_model(canonical: str) -> dict:
             "problems": [],
         }
 
+    if canonical == "report_debrief_remote":
+        return {
+            "mode_debrief": "complement",
+            "sujets": [],
+            "demandes_documents_hors_sujet": [],
+            "global_debrief": {
+                "resume": "",
+                "ordre_du_jour": [],
+                "themes_abordes": [],
+                "actions": [],
+                "perspectives": [
+                    {
+                        "probleme": "adapter_fallback",
+                        "solution": "La sortie debrief du LLM n'a pas pu etre normalisee par openai-adapter."
+                    }
+                ],
+                "annexes": [],
+            },
+        }
+
     # Passe 3A
     if canonical in ("pass3a_remote", "pass3a_remote_alt", "pass3a_remote_alt2"):
         return {"date": None, "link": None, "resume": "", "ordre_du_jour": []}
@@ -1403,6 +1433,66 @@ def normalize_report_annotation(parsed: Any) -> Dict[str, Any]:
     }
 
 
+DEBRIEF_ROOT_KEYS = {
+    "mode_debrief",
+    "sujets",
+    "demandes_documents_hors_sujet",
+    "global_debrief",
+}
+
+
+def _is_debrief_model(canonical: str) -> bool:
+    return canonical == "report_debrief_remote"
+
+
+def normalize_debrief_annotation(parsed: Any) -> Dict[str, Any]:
+    if not isinstance(parsed, dict):
+        raise ValueError("debrief payload must be a JSON object")
+
+    if REPORT_KEYS.intersection(parsed.keys()) and not DEBRIEF_ROOT_KEYS.intersection(parsed.keys()):
+        raise ValueError("report_annotation schema is not a valid debrief payload")
+
+    def _as_list(value):
+        return value if isinstance(value, list) else []
+
+    def _as_dict(value):
+        return value if isinstance(value, dict) else {}
+
+    mode = parsed.get("mode_debrief", "complement")
+    if isinstance(mode, bool):
+        mode = "complement" if mode else "substitution"
+    mode = str(mode).strip().lower() if mode is not None else "complement"
+    if mode not in ("complement", "substitution"):
+        mode = "complement"
+
+    sujets = []
+    for item in _as_list(parsed.get("sujets")):
+        if not isinstance(item, dict):
+            continue
+        normalized = dict(item)
+        normalized["demandes_documents"] = _as_list(normalized.get("demandes_documents"))
+        sujets.append(normalized)
+
+    global_debrief = _as_dict(parsed.get("global_debrief"))
+    resume = global_debrief.get("resume", "")
+    if not isinstance(resume, str):
+        resume = str(resume) if resume is not None else ""
+
+    normalized_global = dict(global_debrief)
+    normalized_global["resume"] = resume.strip()
+    normalized_global["ordre_du_jour"] = _as_list(global_debrief.get("ordre_du_jour"))
+    normalized_global["themes_abordes"] = _as_list(global_debrief.get("themes_abordes"))
+    normalized_global["actions"] = _as_list(global_debrief.get("actions"))
+    normalized_global["perspectives"] = _as_list(global_debrief.get("perspectives"))
+    normalized_global["annexes"] = _as_list(global_debrief.get("annexes"))
+
+    return {
+        "mode_debrief": mode,
+        "sujets": sujets,
+        "demandes_documents_hors_sujet": _as_list(parsed.get("demandes_documents_hors_sujet")),
+        "global_debrief": normalized_global,
+    }
+
 def _is_effectively_empty_report(obj: dict) -> bool:
     if not isinstance(obj, dict):
         return True
@@ -1414,6 +1504,22 @@ def _is_effectively_empty_report(obj: dict) -> bool:
     return True
 
 
+
+def _is_effectively_empty_debrief(obj: dict) -> bool:
+    if not isinstance(obj, dict):
+        return True
+    if obj.get("sujets"):
+        return False
+    if obj.get("demandes_documents_hors_sujet"):
+        return False
+    gd = obj.get("global_debrief")
+    if isinstance(gd, dict):
+        if (gd.get("resume") or "").strip():
+            return False
+        for key in ("ordre_du_jour", "themes_abordes", "actions", "perspectives", "annexes"):
+            if isinstance(gd.get(key), list) and len(gd.get(key)) > 0:
+                return False
+    return True
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 
 def _extract_first_json(text: str) -> str | None:
@@ -2386,6 +2492,7 @@ async def chat_completions(
             last_exc = None
             used_model = canonical
             normalized_report = None
+            normalized_debrief = None
             for m in _fallback_chain_for(canonical):
 
                 response_format = None
@@ -2427,6 +2534,28 @@ async def chat_completions(
                     continue
 
 
+                if _is_debrief_model(canonical):
+                    if not isinstance(parsed, dict):
+                        log.warning("[adapter][debrief-json] parse OK but not a dict model=%s -> next fallback", m)
+                        parsed = None
+                        continue
+
+                    try:
+                        normalized_debrief = normalize_debrief_annotation(parsed)
+                    except Exception as e:
+                        log.warning("[adapter][debrief-json] normalize failed model=%s err=%r -> next fallback", m, e)
+                        normalized_debrief = None
+                        parsed = None
+                        continue
+
+                    if _is_effectively_empty_debrief(normalized_debrief):
+                        log.warning("[adapter][debrief-json] normalized but empty model=%s -> next fallback", m)
+                        normalized_debrief = None
+                        parsed = None
+                        continue
+
+                    used_model = m
+                    break
                 if canonical in ("report_remote", "report_remote_alt", "report_remote_alt2"):
                     # 1) on n'exige pas le schéma complet, juste "report-like" ou même dict
                     if not isinstance(parsed, dict):
@@ -2465,6 +2594,20 @@ async def chat_completions(
                     raise last_exc
                 raise HTTPException(502, "Remote call failed: no response captured")
 
+            if _is_debrief_model(canonical):
+                if normalized_debrief is None:
+                    snippet = (raw or "")[:4000]
+                    log.error("[adapter][debrief-json] raw snippet=%r", snippet)
+                    fb = _fallback_json_for_model(canonical)
+                    log.error("[adapter][debrief-json] impossible a normaliser pour canonical=%s (fallback JSON debrief)", canonical)
+                    content = json.dumps(fb, ensure_ascii=False)
+                else:
+                    content = json.dumps(normalized_debrief, ensure_ascii=False)
+
+                return ChatResp(
+                    model=model,
+                    choices=[ChatRespChoice(index=0, message={"role": "assistant", "content": content})]
+                )
             #----------------------------------------------------------------
             # si report : on exige normalized_report (pas juste parsed)
             if canonical in ("report_remote", "report_remote_alt", "report_remote_alt2"):
