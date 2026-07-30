@@ -441,6 +441,13 @@ MODEL_REGISTRY = {
         "model": "gpt-5-mini",
         "json_mode": True, 
     },
+    "pass2e_remote": {
+        "backend": "openai",
+        "api_base": "https://api.openai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
+        "model": "gpt-4.1-mini",
+        "json_mode": True,
+    },
     # un modèle remote_model spécialisé JSON
     "report_remote": {
         "backend": "openai",
@@ -1048,6 +1055,9 @@ def _fallback_chain_for(canonical: str) -> list[str]:
     if canonical == "annoter_segments_remote_alt":
         return ["annoter_segments_remote_alt", "annoter_segments_remote_alt2"]
 
+    if canonical == "pass2e_remote":
+        return ["pass2e_remote"]
+
     if canonical == "report_remote":
         return ["report_remote", "report_remote_alt", "report_remote_alt2"]
 
@@ -1291,6 +1301,16 @@ def _fallback_json_for_model(canonical: str) -> dict:
     ):
         return {"resume_segment": "", "themes": [], "actions": [], "problems": []}
 
+    if canonical == "pass2e_remote":
+        return {
+            "resume_factuel": "",
+            "points_cles": [],
+            "actions": [],
+            "desaccords": [],
+            "documents_demandes": [],
+            "elements_techniques": [],
+        }
+
     # Passe 2B / global report
     if canonical in ("report_remote", "report_remote_alt", "report_remote_alt2"):
         return {
@@ -1443,6 +1463,67 @@ DEBRIEF_ROOT_KEYS = {
 
 def _is_debrief_model(canonical: str) -> bool:
     return canonical == "report_debrief_remote"
+
+
+PASS2E_KEYS = {
+    "resume_factuel",
+    "points_cles",
+    "actions",
+    "desaccords",
+    "documents_demandes",
+    "elements_techniques",
+}
+
+
+def _is_pass2e_model(canonical: str) -> bool:
+    return canonical == "pass2e_remote"
+
+
+def normalize_pass2e_compact(parsed: Any) -> Dict[str, Any]:
+    if not isinstance(parsed, dict):
+        raise ValueError("pass2e payload must be a JSON object")
+
+    def _as_list(value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            t = value.strip()
+            return [t] if t else []
+        if isinstance(value, list):
+            out = []
+            for item in value:
+                if item is None:
+                    continue
+                s = str(item).strip()
+                if s:
+                    out.append(s)
+            return out
+        s = str(value).strip()
+        return [s] if s else []
+
+    resume = parsed.get("resume_factuel", parsed.get("resume_segment", ""))
+    if not isinstance(resume, str):
+        resume = str(resume) if resume is not None else ""
+
+    return {
+        "resume_factuel": resume.strip(),
+        "points_cles": _as_list(parsed.get("points_cles", parsed.get("themes"))),
+        "actions": _as_list(parsed.get("actions")),
+        "desaccords": _as_list(parsed.get("desaccords", parsed.get("problems"))),
+        "documents_demandes": _as_list(parsed.get("documents_demandes")),
+        "elements_techniques": _as_list(parsed.get("elements_techniques")),
+    }
+
+
+def _is_effectively_empty_pass2e(obj: dict) -> bool:
+    if not isinstance(obj, dict):
+        return True
+    if (obj.get("resume_factuel") or "").strip():
+        return False
+    for key in ("points_cles", "actions", "desaccords", "documents_demandes", "elements_techniques"):
+        if isinstance(obj.get(key), list) and len(obj.get(key)) > 0:
+            return False
+    return True
 
 
 def normalize_debrief_annotation(parsed: Any) -> Dict[str, Any]:
@@ -2493,6 +2574,7 @@ async def chat_completions(
             used_model = canonical
             normalized_report = None
             normalized_debrief = None
+            normalized_pass2e = None
             for m in _fallback_chain_for(canonical):
 
                 response_format = None
@@ -2556,6 +2638,28 @@ async def chat_completions(
 
                     used_model = m
                     break
+                if _is_pass2e_model(canonical):
+                    if not isinstance(parsed, dict):
+                        log.warning("[adapter][pass2e-json] parse OK but not a dict model=%s -> next fallback", m)
+                        parsed = None
+                        continue
+
+                    try:
+                        normalized_pass2e = normalize_pass2e_compact(parsed)
+                    except Exception as e:
+                        log.warning("[adapter][pass2e-json] normalize failed model=%s err=%r -> next fallback", m, e)
+                        normalized_pass2e = None
+                        parsed = None
+                        continue
+
+                    if _is_effectively_empty_pass2e(normalized_pass2e):
+                        log.warning("[adapter][pass2e-json] normalized but empty model=%s -> next fallback", m)
+                        normalized_pass2e = None
+                        parsed = None
+                        continue
+
+                    used_model = m
+                    break
                 if canonical in ("report_remote", "report_remote_alt", "report_remote_alt2"):
                     # 1) on n'exige pas le schéma complet, juste "report-like" ou même dict
                     if not isinstance(parsed, dict):
@@ -2603,6 +2707,20 @@ async def chat_completions(
                     content = json.dumps(fb, ensure_ascii=False)
                 else:
                     content = json.dumps(normalized_debrief, ensure_ascii=False)
+
+                return ChatResp(
+                    model=model,
+                    choices=[ChatRespChoice(index=0, message={"role": "assistant", "content": content})]
+                )
+            if _is_pass2e_model(canonical):
+                if normalized_pass2e is None:
+                    snippet = (raw or "")[:4000]
+                    log.error("[adapter][pass2e-json] raw snippet=%r", snippet)
+                    fb = _fallback_json_for_model(canonical)
+                    log.error("[adapter][pass2e-json] impossible a normaliser pour canonical=%s (fallback JSON pass2e)", canonical)
+                    content = json.dumps(fb, ensure_ascii=False)
+                else:
+                    content = json.dumps(normalized_pass2e, ensure_ascii=False)
 
                 return ChatResp(
                     model=model,
