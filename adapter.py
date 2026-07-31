@@ -1058,6 +1058,9 @@ def _fallback_chain_for(canonical: str) -> list[str]:
     if canonical == "pass2e_remote":
         return ["pass2e_remote"]
 
+    if canonical == "pass3e_remote":
+        return ["pass3e_remote"]
+
     if canonical == "report_remote":
         return ["report_remote", "report_remote_alt", "report_remote_alt2"]
 
@@ -1311,6 +1314,17 @@ def _fallback_json_for_model(canonical: str) -> dict:
             "elements_techniques": [],
         }
 
+    if canonical == "pass3e_remote":
+        return {
+            "numero": None,
+            "titre": "",
+            "localisation": "",
+            "description": "",
+            "avis_participants": [],
+            "synthese_echanges": "",
+            "conclusion_expert": "Fallback adapter Pass3E: la sortie du modele etait vide, invalide ou impossible a normaliser.",
+        }
+
     # Passe 2B / global report
     if canonical in ("report_remote", "report_remote_alt", "report_remote_alt2"):
         return {
@@ -1526,6 +1540,99 @@ def _is_effectively_empty_pass2e(obj: dict) -> bool:
     return True
 
 
+PASS3E_KEYS = {
+    "numero",
+    "titre",
+    "localisation",
+    "description",
+    "avis_participants",
+    "synthese_echanges",
+    "conclusion_expert",
+}
+
+
+def _is_pass3e_model(canonical: str) -> bool:
+    return canonical == "pass3e_remote"
+
+
+def normalize_pass3e_synthesis(parsed: Any) -> Dict[str, Any]:
+    if not isinstance(parsed, dict):
+        raise ValueError("pass3e payload must be a JSON object")
+
+    def _as_text(value):
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            parts = [_as_text(item) for item in value]
+            return "\n\n".join(part for part in parts if part)
+        if isinstance(value, dict):
+            for key in ("resume", "texte", "text", "content", "avis", "commentaire"):
+                if key in value:
+                    t = _as_text(value.get(key))
+                    if t:
+                        return t
+            return json.dumps(value, ensure_ascii=False)
+        return str(value).strip()
+
+    def _as_participants(value):
+        if value is None:
+            return []
+        raw_items = value if isinstance(value, list) else [value]
+        out = []
+        for item in raw_items:
+            if item is None:
+                continue
+            if isinstance(item, str):
+                t = item.strip()
+                if t:
+                    out.append({"nom": "", "role": "", "resume": t})
+                continue
+            if isinstance(item, dict):
+                nom = _as_text(item.get("nom", item.get("name", item.get("participant", ""))))
+                role = _as_text(item.get("role", item.get("qualite", item.get("fonction", ""))))
+                resume = _as_text(item.get("resume", item.get("avis", item.get("texte", item.get("commentaire", item.get("position", ""))))))
+                if nom or role or resume:
+                    out.append({"nom": nom, "role": role, "resume": resume})
+                continue
+            t = _as_text(item)
+            if t:
+                out.append({"nom": "", "role": "", "resume": t})
+        return out
+
+    numero_raw = parsed.get("numero", parsed.get("num", parsed.get("sujet_numero")))
+    numero = numero_raw
+    if isinstance(numero_raw, str):
+        t = numero_raw.strip()
+        try:
+            numero = int(t) if t else None
+        except ValueError:
+            numero = t
+
+    synthese = _as_text(parsed.get("synthese_echanges", parsed.get("synthese", parsed.get("resume", parsed.get("resume_factuel")))))
+    conclusion = _as_text(parsed.get("conclusion_expert", parsed.get("conclusion", parsed.get("avis_expert"))))
+
+    return {
+        "numero": numero,
+        "titre": _as_text(parsed.get("titre", parsed.get("title"))),
+        "localisation": _as_text(parsed.get("localisation", parsed.get("location", parsed.get("lieu")))),
+        "description": _as_text(parsed.get("description", parsed.get("objet", parsed.get("contexte")))),
+        "avis_participants": _as_participants(parsed.get("avis_participants", parsed.get("participants", parsed.get("avis")))),
+        "synthese_echanges": synthese,
+        "conclusion_expert": conclusion,
+    }
+
+
+def _is_effectively_empty_pass3e(obj: dict) -> bool:
+    if not isinstance(obj, dict):
+        return True
+    if obj.get("avis_participants"):
+        return False
+    for key in ("synthese_echanges", "conclusion_expert"):
+        if isinstance(obj.get(key), str) and obj.get(key).strip():
+            return False
+    return True
 def normalize_debrief_annotation(parsed: Any) -> Dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("debrief payload must be a JSON object")
@@ -2575,6 +2682,7 @@ async def chat_completions(
             normalized_report = None
             normalized_debrief = None
             normalized_pass2e = None
+            normalized_pass3e = None
             for m in _fallback_chain_for(canonical):
 
                 response_format = None
@@ -2660,6 +2768,28 @@ async def chat_completions(
 
                     used_model = m
                     break
+                if _is_pass3e_model(canonical):
+                    if not isinstance(parsed, dict):
+                        log.warning("[adapter][pass3e-json] parse OK but not a dict model=%s -> next fallback", m)
+                        parsed = None
+                        continue
+
+                    try:
+                        normalized_pass3e = normalize_pass3e_synthesis(parsed)
+                    except Exception as e:
+                        log.warning("[adapter][pass3e-json] normalize failed model=%s err=%r -> next fallback", m, e)
+                        normalized_pass3e = None
+                        parsed = None
+                        continue
+
+                    if _is_effectively_empty_pass3e(normalized_pass3e):
+                        log.warning("[adapter][pass3e-json] normalized but empty model=%s -> next fallback", m)
+                        normalized_pass3e = None
+                        parsed = None
+                        continue
+
+                    used_model = m
+                    break
                 if canonical in ("report_remote", "report_remote_alt", "report_remote_alt2"):
                     # 1) on n'exige pas le schéma complet, juste "report-like" ou même dict
                     if not isinstance(parsed, dict):
@@ -2721,6 +2851,20 @@ async def chat_completions(
                     content = json.dumps(fb, ensure_ascii=False)
                 else:
                     content = json.dumps(normalized_pass2e, ensure_ascii=False)
+
+                return ChatResp(
+                    model=model,
+                    choices=[ChatRespChoice(index=0, message={"role": "assistant", "content": content})]
+                )
+            if _is_pass3e_model(canonical):
+                if normalized_pass3e is None:
+                    snippet = (raw or "")[:4000]
+                    log.error("[adapter][pass3e-json] raw snippet=%r", snippet)
+                    fb = _fallback_json_for_model(canonical)
+                    log.error("[adapter][pass3e-json] impossible a normaliser pour canonical=%s (fallback JSON pass3e)", canonical)
+                    content = json.dumps(fb, ensure_ascii=False)
+                else:
+                    content = json.dumps(normalized_pass3e, ensure_ascii=False)
 
                 return ChatResp(
                     model=model,
