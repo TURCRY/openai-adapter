@@ -134,9 +134,12 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       REMOTE_API_KEY: ${OPENAI_API_KEY}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY}
+
 
       # Modèles exposés à OpenWebUI (tous, OpenAI + OpenRouter)
-      REMOTE_MODELS: "gpt-5-mini,gpt-5,gpt-5-nano,openai/gpt-oss-120b,text-embedding-3-large,anthropic/claude-sonnet-4.5,google/gemini-2.5-flash-preview-09-2025,google/gemini-2.0-flash-exp:free,meta-llama/llama-4-maverick:free,meta-llama/llama-4-scout:free,google/gemini-flash-1.5,perplexity/sonar-deep-research,deepseek/deepseek-v3.2-exp"
+      REMOTE_MODELS: "gpt-5-mini,gpt-5,gpt-5-nano,openai/gpt-oss-120b,text-embedding-3-large,anthropic/claude-sonnet-4.5,google/gemini-2.5-flash-preview-09-2025,google/gemini-2.0-flash-exp:free,meta-llama/llama-4-maverick:free,meta-llama/llama-4-scout:free,google/gemini-flash-1.5,perplexity/sonar-deep-research,deepseek/deepseek-v3.2-exp,deepseek/deepseek-v4-flash,minimaxai/minimax-m3"
       FALLBACK_REMOTE_MODEL: "gpt-4o-mini"
 
       # gestion modeles OpenAi       # Désactiver l'API Responses et forcer chat/completions :

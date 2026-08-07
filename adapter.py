@@ -21,6 +21,7 @@ import httpcore
 import random
 from hashlib import sha256
 from uuid import uuid4
+import tool_compat as tool_compat
 
 from backend_selection import normalize_backend_url, parse_backend_candidates, select_backend_url
 
@@ -68,7 +69,7 @@ app.add_middleware(
 LOCAL_ROUTE_MAP = {
     # Compat historique
     # tu pourras un jour migrer openwebui/appflowy vers 'annoter_photo'
-    "annoter": "/annoter",  
+    "annoter": "/annoter",
 
     # Photo (libellé/commentaire)
     "annoter_photo": "/annoter",
@@ -90,7 +91,7 @@ LOCAL_ROUTE_MAP.update({
     "ocr_auto": "/ocr_auto",
     "ocr_grid": "/ocr_grid",
     "ocr_history": "/ocr_history",
-     
+
 
     # Tous les modèles locaux → route orchestré
     "local-mistral": "/chat_orchestre",
@@ -169,6 +170,13 @@ ALLOW_REMOTE_EMBEDDINGS = os.getenv("ALLOW_REMOTE_EMBEDDINGS", "0") == "1"
 
 # RAG (délégué au Flask)
 RAG_MODE = os.getenv("RAG_MODE", "off")   # off|always|on_tool
+
+MAX_TOOLS = int(os.getenv("MAX_TOOLS", "128"))
+MAX_TOOL_SCHEMA_BYTES = int(os.getenv("MAX_TOOL_SCHEMA_BYTES", str(2 * 1024 * 1024)))
+MAX_TOOL_CALLS_PER_RESPONSE = int(os.getenv("MAX_TOOL_CALLS_PER_RESPONSE", "32"))
+MAX_FUNCTION_ARGUMENTS_BYTES = int(os.getenv("MAX_FUNCTION_ARGUMENTS_BYTES", "262144"))
+MAX_FUNCTION_OUTPUT_BYTES = int(os.getenv("MAX_FUNCTION_OUTPUT_BYTES", "262144"))
+FUNCTION_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
 RAG_TOP_K = int(os.getenv("RAG_TOP_K") or "4")
 QDRANT_URL = os.getenv("QDRANT_URL", "")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
@@ -431,7 +439,7 @@ MODEL_REGISTRY = {
         "api_base": "https://api.openai.com/v1",
         "api_key_env": "OPENAI_API_KEY",
         "model": "gpt-4.1-mini",
-        "json_mode": True, 
+        "json_mode": True,
     },
     # un modèle remote (OpenAI ou autre) spécialisé JSON
     "annoter_segments_remote_alt2": {
@@ -439,7 +447,7 @@ MODEL_REGISTRY = {
         "api_base": "https://api.openai.com/v1",
         "api_key_env": "OPENAI_API_KEY",
         "model": "gpt-5-mini",
-        "json_mode": True, 
+        "json_mode": True,
     },
     "pass2e_remote": {
         "backend": "openai",
@@ -456,7 +464,7 @@ MODEL_REGISTRY = {
         # Benchmark A60: gpt-4.1-mini retenu pour report_remote en exploitation normale;
         # gpt-5-mini conserve en variante plus lente.
         "model": "gpt-4.1-mini",
-        "json_mode": True, 
+        "json_mode": True,
     },
     "report_debrief_remote": {
         "backend": "openai",
@@ -486,7 +494,7 @@ MODEL_REGISTRY = {
         "api_base": "https://api.openai.com/v1",
         "api_key_env": "OPENAI_API_KEY",
         "model": "gpt-5-mini",
-        "json_mode": True, 
+        "json_mode": True,
     },
     "pass3_remote_alt": {
         "backend": "openai",
@@ -962,6 +970,13 @@ def _normalize_model_for_base(model_id: str, base: str) -> str:
         m = m.replace("openai/", "")  # openrouter → openai direct
     return m
 
+def _remote_model_ids(requested_model: str, cfg: dict, base: str) -> tuple[str, str, bool]:
+    physical_model = str(cfg.get("model") or requested_model).strip()
+    explicit_provider_model = str(cfg.get("provider_model") or "").strip()
+    if explicit_provider_model:
+        return physical_model, explicit_provider_model, True
+    return physical_model, _normalize_model_for_base(physical_model, base), False
+
 
 def _should_fallback_remote(status_code: int | None, exc: Exception | None) -> bool:
     if exc is not None:
@@ -1069,7 +1084,7 @@ def _fallback_chain_for(canonical: str) -> list[str]:
 
     if canonical == "report_remote_alt":
         return ["report_remote_alt", "report_remote_alt2"]
-    
+
     if canonical == "pass3_remote":
         return ["pass3_remote", "pass3_remote_alt", "pass3_remote_alt2"]
     if canonical == "pass3_remote_alt":
@@ -1077,34 +1092,34 @@ def _fallback_chain_for(canonical: str) -> list[str]:
     # passe 3E
     if canonical == "pass3e_local":
         return ["pass3e_local", "pass3e_local_alt", "pass3e_remote"]
-   
+
     if canonical == "pass3e_local_alt":
         return ["pass3e_local_alt", "pass3e_remote"]
     # passe 3A
     if canonical == "pass3a_remote":
         return ["pass3a_remote", "pass3a_remote_alt", "pass3a_remote_alt2"]
-    
+
     if canonical == "pass3a_remote_alt":
         return ["pass3a_remote_alt", "pass3a_remote_alt2"]
     # passe 3B
     if canonical == "pass3b_remote":
         return ["pass3b_remote", "pass3b_remote_alt", "pass3b_remote_alt2"]
-    
+
     if canonical == "pass3b_remote_alt":
         return ["pass3b_remote_alt", "pass3b_remote_alt2"]
     # passe 3C
     if canonical == "pass3c_remote":
         return ["pass3c_remote", "pass3c_remote_alt", "pass3c_remote_alt2"]
-    
+
     if canonical == "pass3c_remote_alt":
         return ["pass3c_remote_alt", "pass3c_remote_alt2"]
     # passe 3D
     if canonical == "pass3d_remote":
         return ["pass3d_remote", "pass3d_remote_alt", "pass3d_remote_alt2"]
-    
+
     if canonical == "pass3d_remote_alt":
         return ["pass3d_remote_alt", "pass3d_remote_alt2"]
-        
+
     return [canonical]
 
 def _is_effectively_empty_payload(obj) -> bool:
@@ -1796,44 +1811,267 @@ def _extract_first_json_object(text: str) -> str | None:
 
 
 #-----------------------------------------------------------
+async def _remote_responses_native(
+    *,
+    requested_model: str,
+    canonical_model: str,
+    input_value: Any,
+    instructions: str | None = None,
+    tools: list | None = None,
+    tool_choice: Any | None = None,
+    reasoning: Any | None = None,
+    max_output_tokens: int | None = None,
+    parallel_tool_calls: bool | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    cfg = _model_cfg(canonical_model)
+    base0 = (cfg.get("base_url") or cfg.get("api_base") or "").rstrip("/")
+    if not base0:
+        raise HTTPException(502, f"Remote config missing base_url/api_base for model '{canonical_model}'")
+    physical_model, provider_model, explicit_provider_model = _remote_model_ids(canonical_model, cfg, base0)
+    if not explicit_provider_model and provider_model != canonical_model:
+        cfg.update(_remote_overrides(provider_model))
+    cfg_phys = (_REMOTE_CONF.get("models") or {}).get(provider_model, {})
+    if not explicit_provider_model and cfg_phys:
+        cfg.update(cfg_phys)
+    base = (cfg.get("base_url") or cfg.get("api_base") or "").rstrip("/")
+    physical_model, provider_model, explicit_provider_model = _remote_model_ids(canonical_model, cfg, base)
+    api_env = cfg.get("api_key_env", "OPENAI_API_KEY")
+    api_key = os.getenv(api_env, "").strip()
+    if not base or not api_key:
+        raise HTTPException(502, f"Remote config/keys missing for model '{canonical_model}' (base={base}, env={api_env})")
+
+    payload: dict[str, Any] = {
+        "model": provider_model,
+        "input": _responses_native_input(input_value),
+    }
+    if instructions:
+        payload["instructions"] = str(instructions)
+    native_tools = _responses_tools_to_native(tools, requested_model)
+    if native_tools:
+        payload["tools"] = native_tools
+    native_tool_choice = _responses_tool_choice_to_native(tool_choice)
+    if native_tool_choice is not None and _native_responses_should_send_tool_choice(cfg, reasoning):
+        payload["tool_choice"] = native_tool_choice
+    elif native_tool_choice is not None:
+        log.debug("[remote_responses_native] omitting tool_choice because thinking mode does not support it requested_model=%s", requested_model)
+    if reasoning is not None:
+        payload["reasoning"] = reasoning
+    if max_output_tokens is not None:
+        payload["max_output_tokens"] = max_output_tokens
+    if parallel_tool_calls is not None:
+        payload["parallel_tool_calls"] = bool(parallel_tool_calls)
+    if metadata and cfg.get("supports_metadata", True):
+        payload["metadata"] = metadata
+
+    endpoint = f"{base}/responses"
+    log.debug("[remote_responses_native] payload_summary=%s", _native_responses_payload_summary(
+        endpoint=endpoint,
+        requested_model=requested_model,
+        provider_model=provider_model,
+        payload=payload,
+    ))
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    timeout_s = cfg.get("timeout")
+    timeout = httpx.Timeout(timeout_s) if timeout_s else TIMEOUT_REMOTE
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        t0 = time.monotonic()
+        r = await client.post(endpoint, json=payload, headers=headers)
+        elapsed = time.monotonic() - t0
+    try:
+        r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        body = ""
+        try:
+            body = e.response.text
+        except Exception:
+            pass
+        log.error("Upstream native Responses HTTP %s endpoint=%s body=%s", e.response.status_code, endpoint, body[:2000])
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail={"message": f"Upstream error {e.response.status_code}", "endpoint": endpoint, "body": body[:500]},
+        )
+    data = r.json() or {}
+    log.info(
+        "[remote_responses_native] done requested_model=%s provider_model=%s status=%s elapsed=%.3fs usage=%s",
+        requested_model,
+        provider_model,
+        data.get("status") if isinstance(data, dict) else None,
+        elapsed,
+        data.get("usage") if isinstance(data, dict) else None,
+    )
+    if isinstance(data, dict):
+        data = _normalize_native_response_model(data, requested_model)
+        data.setdefault("output_text", _native_response_output_text(data))
+    return data
+
+
+async def _remote_responses_native_stream(
+    *,
+    requested_model: str,
+    canonical_model: str,
+    input_value: Any,
+    instructions: str | None = None,
+    tools: list | None = None,
+    tool_choice: Any | None = None,
+    reasoning: Any | None = None,
+    max_output_tokens: int | None = None,
+    parallel_tool_calls: bool | None = None,
+    metadata: dict | None = None,
+):
+    cfg = _model_cfg(canonical_model)
+    base0 = (cfg.get("base_url") or cfg.get("api_base") or "").rstrip("/")
+    physical_model, provider_model, explicit_provider_model = _remote_model_ids(canonical_model, cfg, base0)
+    if not explicit_provider_model and provider_model != canonical_model:
+        cfg.update(_remote_overrides(provider_model))
+    cfg_phys = (_REMOTE_CONF.get("models") or {}).get(provider_model, {})
+    if not explicit_provider_model and cfg_phys:
+        cfg.update(cfg_phys)
+    base = (cfg.get("base_url") or cfg.get("api_base") or "").rstrip("/")
+    physical_model, provider_model, explicit_provider_model = _remote_model_ids(canonical_model, cfg, base)
+    api_env = cfg.get("api_key_env", "OPENAI_API_KEY")
+    api_key = os.getenv(api_env, "").strip()
+    if not base or not api_key:
+        yield _sse_event("error", {"type": "error", "error": {"message": f"Remote config/keys missing for model '{canonical_model}'"}})
+        return
+
+    payload: dict[str, Any] = {
+        "model": provider_model,
+        "input": _responses_native_input(input_value),
+        "stream": True,
+    }
+    if instructions:
+        payload["instructions"] = str(instructions)
+    native_tools = _responses_tools_to_native(tools, requested_model)
+    if native_tools:
+        payload["tools"] = native_tools
+    native_tool_choice = _responses_tool_choice_to_native(tool_choice)
+    if native_tool_choice is not None and _native_responses_should_send_tool_choice(cfg, reasoning):
+        payload["tool_choice"] = native_tool_choice
+    elif native_tool_choice is not None:
+        log.debug("[remote_responses_native_stream] omitting tool_choice because thinking mode does not support it requested_model=%s", requested_model)
+    if reasoning is not None:
+        payload["reasoning"] = reasoning
+    if max_output_tokens is not None:
+        payload["max_output_tokens"] = max_output_tokens
+    if parallel_tool_calls is not None:
+        payload["parallel_tool_calls"] = bool(parallel_tool_calls)
+    if metadata and cfg.get("supports_metadata", True):
+        payload["metadata"] = metadata
+
+    endpoint = f"{base}/responses"
+    log.debug("[remote_responses_native_stream] payload_summary=%s", _native_responses_payload_summary(
+        endpoint=endpoint,
+        requested_model=requested_model,
+        provider_model=provider_model,
+        payload=payload,
+    ))
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    timeout_s = cfg.get("timeout")
+    timeout = httpx.Timeout(timeout_s) if timeout_s else TIMEOUT_REMOTE
+    event_name = "message"
+    data_lines: list[str] = []
+
+    def flush_event():
+        nonlocal event_name, data_lines
+        if not data_lines:
+            event_name = "message"
+            return None
+        raw_data = "\n".join(data_lines)
+        event = event_name or "message"
+        event_name = "message"
+        data_lines = []
+        if raw_data.strip() == "[DONE]":
+            return None
+        try:
+            payload_obj = json.loads(raw_data)
+        except Exception:
+            payload_obj = {"type": event, "data": raw_data}
+        if isinstance(payload_obj, dict):
+            return _native_response_sse_event(event, payload_obj, requested_model)
+        return _sse_event(event, {"type": event, "data": payload_obj})
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", endpoint, json=payload, headers=headers) as resp:
+                if resp.status_code >= 400:
+                    body = ""
+                    try:
+                        body = (await resp.aread()).decode("utf-8", errors="replace")
+                    except Exception:
+                        pass
+                    yield _sse_event("error", {"type": "error", "error": {"status_code": resp.status_code, "endpoint": endpoint, "body": body[:500]}})
+                    return
+                async for line in resp.aiter_lines():
+                    line = (line or "").rstrip("\r")
+                    if not line:
+                        event = flush_event()
+                        if event:
+                            yield event
+                        continue
+                    if line.startswith("event:"):
+                        event_name = line[6:].strip() or "message"
+                        continue
+                    if line.startswith("data:"):
+                        data_lines.append(line[5:].lstrip())
+                        continue
+                event = flush_event()
+                if event:
+                    yield event
+    except asyncio.CancelledError:
+        log.debug("[remote_responses_native_stream] client disconnected requested_model=%s", requested_model)
+        raise
+    except Exception as exc:
+        log.warning("[remote_responses_native_stream] error requested_model=%s err=%s", requested_model, exc)
+        yield _sse_event("error", {"type": "error", "error": {"message": str(exc)}})
+
 async def _remote_chat(
     messages: list[dict],
     model: str,
     temperature: float | None,
     response_format: dict | None = None,
-) -> str:
+    max_tokens_override: int | None = None,
+    source_route: str = "chat/completions",
+    tools: list[dict] | None = None,
+    tool_choice: Any | None = None,
+    reasoning: Any | None = None,
+    return_raw_response: bool = False,
+) -> Any:
     # 1) cfg + modèle physique etc. (gardez votre code existant jusqu'à prov/is_modern)
 
     cfg = _model_cfg(model)
-    physical_model = cfg.get("model") or model
     base0 = (cfg.get("base_url") or cfg.get("api_base") or "").rstrip("/")
     if not base0:
         raise HTTPException(502, f"Remote config missing base_url/api_base for model '{model}'")
 
-    model_norm = _normalize_model_for_base(physical_model, base0)
-    # Ajout : overrides REMOTE_CONF par modèle normalisé (si différent)
-    if model_norm != model:
-        cfg.update(_remote_overrides(model_norm))
+    physical_model, provider_model, explicit_provider_model = _remote_model_ids(model, cfg, base0)
+    # Ajout : overrides REMOTE_CONF par modele normalise (si different), sauf si
+    # provider_model fixe explicitement le nom attendu par le fournisseur.
+    if not explicit_provider_model and provider_model != model:
+        cfg.update(_remote_overrides(provider_model))
 
-    cfg_phys = (_REMOTE_CONF.get("models") or {}).get(model_norm, {})
-    if cfg_phys:
+    cfg_phys = (_REMOTE_CONF.get("models") or {}).get(provider_model, {})
+    if not explicit_provider_model and cfg_phys:
         cfg.update(cfg_phys)
 
     base = (cfg.get("base_url") or cfg.get("api_base") or "").rstrip("/")
+    physical_model, provider_model, explicit_provider_model = _remote_model_ids(model, cfg, base)
     api_env = cfg.get("api_key_env", "OPENAI_API_KEY")
     api_key = os.getenv(api_env, "").strip()
     if not base or not api_key:
         raise HTTPException(502, f"Remote config/keys missing for model '{model}' (base={base}, env={api_env})")
 
     prov = _provider_name(base)
-    is_modern = model_norm.startswith(("gpt-5", "o1", "o3", "o4"))
+    is_modern = provider_model.startswith(("gpt-5", "o1", "o3", "o4"))
 
     use_responses_flag = cfg.get("use_responses_api", USE_RESPONSES)
     force_chat_flag    = cfg.get("force_chat", FORCE_CHAT)
 
 
-    log.info("[remote_chat] model=%s physical=%s model_norm=%s base=%s api_env=%s",
-             model, physical_model, model_norm, base, api_env)
+    log.info(
+        "[remote_chat] route=%s requested_model=%s physical_model=%s provider_model=%s base_url=%s api_key_env=%s tools=%s tool_choice=%s",
+        source_route, model, physical_model, provider_model, base, api_env, bool(tools), tool_choice,
+    )
 
     # 2) flags (UNE SEULE FOIS)
     use_responses_flag = cfg.get("use_responses_api", USE_RESPONSES)
@@ -1844,7 +2082,7 @@ async def _remote_chat(
     # 3) paramètres communs
     temp = temperature if temperature is not None else cfg.get("temperature")
     top_p = cfg.get("top_p")
-    max_tokens = cfg.get("max_tokens")
+    max_tokens = max_tokens_override if max_tokens_override is not None else cfg.get("max_tokens")
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if "openrouter.ai" in base:
@@ -1862,7 +2100,7 @@ async def _remote_chat(
         if use_resp:
             instr, input_msgs = _messages_to_responses_payload(messages)
 
-            p = {"model": model_norm, "input": input_msgs}
+            p = {"model": provider_model, "input": input_msgs}
             if instr:
                 p["instructions"] = instr
 
@@ -1883,9 +2121,10 @@ async def _remote_chat(
                 # (si vous utilisez max_completion_tokens ailleurs, adaptez ici de façon cohérente)
                 p["max_output_tokens"] = max_tokens
 
-            log.debug("POST %s keys=%s", f"{base}/responses", sorted(p.keys()))
+            endpoint = f"{base}/responses"
+            log.debug("[remote_chat] route=%s endpoint=%s keys=%s", source_route, endpoint, sorted(p.keys()))
             upstream_t0 = time.monotonic()
-            r = await client.post(f"{base}/responses", json=p, headers=headers)
+            r = await client.post(endpoint, json=p, headers=headers)
             upstream_elapsed = time.monotonic() - upstream_t0
 
             # retry si 400 sur sampling
@@ -1898,7 +2137,7 @@ async def _remote_chat(
                         p.pop("top_p", None)
                         log.debug("Retry /responses without temperature/top_p keys=%s", sorted(p.keys()))
                         upstream_t0 = time.monotonic()
-                        r = await client.post(f"{base}/responses", json=p, headers=headers)
+                        r = await client.post(endpoint, json=p, headers=headers)
                         upstream_elapsed = time.monotonic() - upstream_t0
                 except Exception:
                     pass
@@ -1910,18 +2149,21 @@ async def _remote_chat(
                     body = e.response.text
                 except Exception:
                     pass
-                log.error("OpenAI HTTP %s: %s", e.response.status_code, body[:2000])
+                log.error("Upstream HTTP %s endpoint=%s body=%s", e.response.status_code, endpoint, body[:2000])
                 raise HTTPException(
-                    status_code=502,
-                    detail=f"Upstream OpenAI error {e.response.status_code}: {body[:500]}"
+                    status_code=e.response.status_code,
+                    detail={
+                        "message": f"Upstream error {e.response.status_code}",
+                        "endpoint": endpoint,
+                        "body": body[:500],
+                    },
                 )
-
             j = r.json() or {}
             usage = j.get("usage") if isinstance(j, dict) else None
             log.info(
                 "[remote_chat] upstream responses done logical=%s physical=%s status=%s elapsed=%.3fs usage=%s",
                 model,
-                model_norm,
+                provider_model,
                 j.get("status"),
                 upstream_elapsed,
                 usage,
@@ -1939,7 +2181,13 @@ async def _remote_chat(
             return "\n".join(out) if out else (j.get("output_text") or str(j))
 
         # 5) chemin Chat Completions
-        payload = {"model": model_norm, "messages": messages, "stream": False}
+        payload = {"model": provider_model, "messages": messages, "stream": False}
+        if tools:
+            payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+        if reasoning is not None and cfg.get("supports_reasoning"):
+            payload["reasoning"] = reasoning
 
         # tokens
         if max_tokens is not None:
@@ -1966,7 +2214,7 @@ async def _remote_chat(
                 log.info(
                     "[remote_chat] response_format logical=%s physical=%s name=%s marker=%s",
                     model,
-                    model_norm,
+                    provider_model,
                     rf_name,
                     _response_format_marker(payload["response_format"]),
                 )
@@ -1974,10 +2222,32 @@ async def _remote_chat(
                 payload["response_format"] = {"type": "json_object"}
 
 
-        log.debug("POST %s keys=%s", f"{base}/chat/completions", sorted(payload.keys()))
+        endpoint = f"{base}/chat/completions"
+        log.debug("[remote_chat] route=%s endpoint=%s keys=%s payload_summary=%s", source_route, endpoint, sorted(payload.keys()), _chat_payload_debug_summary(
+            requested_model=model,
+            provider_model=provider_model,
+            messages=messages,
+            payload=payload,
+            endpoint=endpoint,
+        ))
+        _log_deepseek_tools_payload(
+            route="remote_chat",
+            requested_model=model,
+            provider_model=provider_model,
+            endpoint=endpoint,
+            payload=payload,
+        )
         upstream_t0 = time.monotonic()
-        r = await client.post(f"{base}/chat/completions", json=payload, headers=headers)
+        r = await client.post(endpoint, json=payload, headers=headers)
         upstream_elapsed = time.monotonic() - upstream_t0
+        log.debug("[remote_chat] payload_done=%s", _chat_payload_debug_summary(
+            requested_model=model,
+            provider_model=provider_model,
+            messages=messages,
+            payload=payload,
+            endpoint=endpoint,
+            duration=upstream_elapsed,
+        ))
 
         # Retry automatique si 400 sur sampling (temp/top_p)
         if r.status_code == 400 and prov == "openai":
@@ -1994,7 +2264,7 @@ async def _remote_chat(
                         sorted(payload.keys())
                     )
                     upstream_t0 = time.monotonic()
-                    r = await client.post(f"{base}/chat/completions", json=payload, headers=headers)
+                    r = await client.post(endpoint, json=payload, headers=headers)
                     upstream_elapsed = time.monotonic() - upstream_t0
             except Exception:
                 pass
@@ -2008,13 +2278,19 @@ async def _remote_chat(
                 body = e.response.text
             except Exception:
                 pass
-            log.error("OpenAI HTTP %s: %s", e.response.status_code, body[:2000])
+            log.error("Upstream HTTP %s endpoint=%s body=%s", e.response.status_code, endpoint, body[:2000])
             raise HTTPException(
-                status_code=502,
-                detail=f"Upstream OpenAI error {e.response.status_code}: {body[:500]}"
+                status_code=e.response.status_code,
+                detail={
+                    "message": f"Upstream error {e.response.status_code}",
+                    "endpoint": endpoint,
+                    "body": body[:500],
+                },
             )
-
         j = r.json() or {}
+
+        if return_raw_response:
+            return j
 
         content = None
         finish_reason = ""
@@ -2029,7 +2305,7 @@ async def _remote_chat(
         log.info(
             "[remote_chat] upstream chat done logical=%s physical=%s elapsed=%.3fs finish_reason=%s usage=%s",
             model,
-            model_norm,
+            provider_model,
             upstream_elapsed,
             finish_reason,
             usage,
@@ -2128,7 +2404,7 @@ async def _discover_local_models_with_ids() -> tuple[list[str], set[str]]:
         try:
             async with httpx.AsyncClient(timeout=timeout) as c:
                 r = await c.get(url, headers=headers)
-                
+
                 r.raise_for_status()
                 j = r.json()
             break
@@ -2333,7 +2609,7 @@ async def _local_chat(
         raise HTTPException(status_code=502, detail="Local LLM unreachable after WOL attempt")
 
     meta = meta or {}
-    
+
 
     path = "/chat_orchestre"
     url = f"{LOCAL_BASE}{path}"
@@ -2437,7 +2713,7 @@ async def _local_chat(
                     or j.get("text")
                     or str(j))
         return str(j)
-  
+
 # -----------------------------------------------------------------------------
 # Schemas OpenAI compat
 # -----------------------------------------------------------------------------
@@ -2463,6 +2739,19 @@ class ChatResp(BaseModel):
     object: str = "chat.completion"
     model: str
     choices: list[ChatRespChoice]
+
+class ResponsesReq(BaseModel):
+    model: str
+    input: Any
+    instructions: str | None = None
+    stream: bool | None = None
+    max_output_tokens: int | None = None
+    tools: list | None = None
+    tool_choice: Any | None = None
+    reasoning: Any | None = None
+    parallel_tool_calls: bool | None = None
+    previous_response_id: str | None = None
+    metadata: dict | None = None
 
 class EmbReq(BaseModel):
     model: str | None = None
@@ -2525,15 +2814,1318 @@ async def list_models(authorization: t.Annotated[str | None, Header()] = None):
     return {"object": "list", "data": data}
 
 
+
+def _responses_observed_roles(input_value: Any) -> list[str]:
+    roles: list[str] = []
+    if isinstance(input_value, list):
+        for item in input_value:
+            if isinstance(item, dict) and item.get("type") in (None, "message") and item.get("role") is not None:
+                roles.append(str(item.get("role")))
+    return roles
+
+
+def _responses_input_to_messages(
+    input_value: Any,
+    instructions: str | None = None,
+    *,
+    cfg: dict | None = None,
+    requested_model: str | None = None,
+) -> list[dict]:
+    messages: list[dict] = []
+    developer_conversions = 0
+    preserve_developer = bool((cfg or {}).get("supports_developer_role"))
+    if instructions:
+        messages.append({"role": "system", "content": str(instructions)})
+
+    if isinstance(input_value, str):
+        if not input_value.strip():
+            raise HTTPException(status_code=400, detail="Responses input string cannot be empty")
+        messages.append({"role": "user", "content": input_value})
+        return messages
+
+    if not isinstance(input_value, list) or not input_value:
+        raise HTTPException(status_code=400, detail="Responses input must be a string or a non-empty list")
+
+    for item in input_value:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="Responses input items must be objects")
+
+        item_type = item.get("type")
+        if item_type in (None, "message"):
+            developer_conversions += _append_responses_message(
+                messages,
+                item,
+                preserve_developer=preserve_developer,
+            )
+            continue
+        if item_type == "function_call":
+            messages.append(_responses_function_call_to_chat_message(item))
+            continue
+        if item_type == "function_call_output":
+            messages.append(_responses_function_output_to_chat_message(item))
+            continue
+        raise HTTPException(status_code=400, detail=f"Responses input item type '{item_type}' is not supported")
+
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(
+            "[responses_input] requested_model=%s input_item_types=%s roles=%s developer_to_system=%s preserve_developer=%s",
+            requested_model,
+            _responses_input_item_types(input_value),
+            _responses_observed_roles(input_value),
+            developer_conversions,
+            preserve_developer,
+        )
+    return messages
+
+
+def _usage_zero() -> dict:
+    return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+
+def _convert_openai_usage(usage: Any) -> dict:
+    if not isinstance(usage, dict):
+        return _usage_zero()
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    completion_details = usage.get("completion_tokens_details") or {}
+    converted = {
+        "input_tokens": usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0,
+        "output_tokens": usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0,
+        "total_tokens": usage.get("total_tokens", 0) or 0,
+    }
+    cached_tokens = prompt_details.get("cached_tokens")
+    reasoning_tokens = completion_details.get("reasoning_tokens")
+    if cached_tokens is not None:
+        converted["cached_tokens"] = cached_tokens
+    if reasoning_tokens is not None:
+        converted["reasoning_tokens"] = reasoning_tokens
+    return converted
+
+
+def _sse_event(event: str, payload: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _responses_stream_headers() -> dict:
+    return {"Cache-Control": "no-cache", "Connection": "keep-alive"}
+
+def _json_bytes(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _tool_schema_stats(tools: list | None) -> dict:
+    return tool_compat.inspect_tools(
+        tools,
+        max_tools=MAX_TOOLS,
+        max_schema_bytes=MAX_TOOL_SCHEMA_BYTES,
+    )
+
+
+def _tool_structure_summary(tools: list | None) -> list[dict]:
+    return tool_compat.inspect_tool_structures(tools)
+
+
+def _log_tool_schema_stats(route: str, requested_model: str | None, tools: list | None) -> None:
+    if not log.isEnabledFor(logging.DEBUG):
+        return
+    stats = _tool_schema_stats(tools)
+    log.debug(
+        "[tool_schema] route=%s requested_model=%s tool_count=%s tools_size_bytes=%s "
+        "max_tool_size_bytes=%s tool_types=%s max_tools=%s max_tool_schema_bytes=%s",
+        route,
+        requested_model,
+        stats["tool_count"],
+        stats["tools_size_bytes"],
+        stats["max_tool_size_bytes"],
+        stats["tool_types"],
+        stats["max_tools"],
+        stats["max_tool_schema_bytes"],
+    )
+    log.debug(
+        "[tool_schema_structure] route=%s requested_model=%s tools=%s",
+        route,
+        requested_model,
+        _tool_structure_summary(tools),
+    )
+
+
+def _tool_capabilities_from_cfg(cfg: dict, *, native_responses: bool = False) -> tool_compat.ProviderToolCapabilities:
+    return tool_compat.capabilities_from_config(cfg, native_responses=native_responses)
+
+
+def _tool_compat_http_error(exc: tool_compat.ToolCompatibilityError) -> HTTPException:
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+def _safe_tool_name_part(value: Any) -> str:
+    part = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value or "").strip())
+    part = part.strip("_")
+    if not part or not re.match(r"^[A-Za-z_]", part):
+        part = f"tool_{part}" if part else "tool"
+    return part
+
+
+def _flattened_namespace_tool_name(namespace: str, name: str) -> str:
+    base = f"{_safe_tool_name_part(namespace)}__{_safe_tool_name_part(name)}"
+    if len(base) <= 64:
+        return base
+    digest = hashlib.sha256(base.encode("utf-8")).hexdigest()[:10]
+    keep = max(1, 64 - len(digest) - 1)
+    return f"{base[:keep]}_{digest}"
+
+
+def _ensure_unique_tool_name(name: str, seen: set[str]) -> str:
+    if name in seen:
+        raise HTTPException(status_code=400, detail=f"Tool name collision after conversion: {name}")
+    seen.add(name)
+    return name
+
+
+def _chat_function_tools_from_responses(tools: list, requested_model: str) -> list[tuple[dict, str | None]]:
+    flattened: list[tuple[dict, str | None]] = []
+    seen: set[str] = set()
+    for tool in tools:
+        if not isinstance(tool, dict):
+            raise HTTPException(status_code=400, detail="Responses tools must be objects")
+        tool_type = tool.get("type")
+        if tool_type == "function":
+            name = _validate_function_name(tool.get("name"))
+            _ensure_unique_tool_name(name, seen)
+            flattened.append((tool, None))
+            continue
+        if tool_type == "namespace":
+            namespace = _validate_function_name(tool.get("name"))
+            subtools = tool.get("tools")
+            if not isinstance(subtools, list) or not subtools:
+                raise HTTPException(status_code=400, detail="Namespace tool must contain a non-empty tools list")
+            for subtool in subtools:
+                if not isinstance(subtool, dict):
+                    raise HTTPException(status_code=400, detail="Namespace subtools must be objects")
+                if subtool.get("type") != "function":
+                    raise HTTPException(status_code=400, detail="Only function subtools are supported inside namespace tools")
+                original_name = _validate_function_name(subtool.get("name"))
+                flattened_name = _ensure_unique_tool_name(_flattened_namespace_tool_name(namespace, original_name), seen)
+                flattened.append((subtool, flattened_name))
+            continue
+        if tool_type in ("web_search", "web_search_preview"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tool type '{tool_type}' cannot be transported faithfully to Chat Completions for model '{requested_model}'",
+            )
+        raise HTTPException(status_code=400, detail=f"Unsupported tool type '{tool_type}'")
+    return flattened
+
+
+def _tool_capability(cfg: dict, name: str) -> bool:
+    return bool(cfg.get(name))
+
+
+def _serialize_function_payload(value: Any, *, max_bytes: int, field_name: str) -> str:
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except TypeError:
+            raise HTTPException(status_code=400, detail=f"{field_name} must be JSON serializable")
+    if len(text.encode("utf-8")) > max_bytes:
+        raise HTTPException(status_code=400, detail=f"{field_name} exceeds configured byte limit")
+    return text
+
+
+def _validate_function_name(name: Any) -> str:
+    name_s = str(name or "")
+    if not FUNCTION_NAME_RE.match(name_s):
+        raise HTTPException(status_code=400, detail="Function tool name is invalid")
+    return name_s
+
+
+def _responses_tools_to_chat_result(tools: list | None, cfg: dict, requested_model: str, tool_choice: Any | None = None) -> tool_compat.ToolTranslationResult:
+    if not tools:
+        return tool_compat.ToolTranslationResult(tools=[])
+    _log_tool_schema_stats("responses_to_chat", requested_model, tools)
+    try:
+        result = tool_compat.translate_tools_for_chat(
+            tools,
+            _tool_capabilities_from_cfg(cfg),
+            requested_model=requested_model,
+            max_tools=MAX_TOOLS,
+            max_schema_bytes=MAX_TOOL_SCHEMA_BYTES,
+            tool_choice=tool_choice,
+        )
+    except tool_compat.ToolCompatibilityError as exc:
+        raise _tool_compat_http_error(exc)
+    for warning in result.warnings:
+        log.debug("[responses_tools] %s requested_model=%s", warning, requested_model)
+    return result
+
+
+def _responses_tools_to_chat_tools(tools: list | None, cfg: dict, requested_model: str) -> list[dict] | None:
+    result = _responses_tools_to_chat_result(tools, cfg, requested_model)
+    return result.tools or None
+
+def _responses_tool_choice_to_chat(tool_choice: Any, cfg: dict) -> Any | None:
+    if tool_choice is None:
+        return None
+    if tool_choice in ("auto", "none", "required"):
+        return tool_choice
+    if not isinstance(tool_choice, dict):
+        raise HTTPException(status_code=400, detail="Unsupported tool_choice")
+    if tool_choice.get("type") != "function":
+        raise HTTPException(status_code=400, detail="Unsupported tool_choice type")
+    fn = tool_choice.get("function")
+    name = fn.get("name") if isinstance(fn, dict) else tool_choice.get("name")
+    return {"type": "function", "function": {"name": _validate_function_name(name)}}
+
+
+def _input_contains_tool_items(input_value: Any) -> bool:
+    return isinstance(input_value, list) and any(isinstance(item, dict) and item.get("type") in ("function_call", "function_call_output") for item in input_value)
+
+def _responses_has_tool_outputs(input_value: Any) -> bool:
+    return isinstance(input_value, list) and any(isinstance(item, dict) and item.get("type") == "function_call_output" for item in input_value)
+
+
+def _responses_tool_call_count(messages: list[dict]) -> int:
+    return sum(len(m.get("tool_calls") or []) for m in messages if isinstance(m, dict))
+
+
+def _responses_final_tool_result_turn(input_value: Any, tool_choice: Any) -> bool:
+    return _responses_has_tool_outputs(input_value) and tool_choice in (None, "none")
+
+
+def _responses_effective_max_tokens(requested_max: int | None, final_tool_result_turn: bool) -> int | None:
+    if not final_tool_result_turn:
+        return requested_max
+    if requested_max is None:
+        return 256
+    return min(int(requested_max), 256)
+
+
+def _chat_payload_debug_summary(
+    *,
+    requested_model: str,
+    provider_model: str,
+    messages: list[dict],
+    payload: dict,
+    endpoint: str,
+    duration: float | None = None,
+) -> dict:
+    summary = {
+        "requested_model": requested_model,
+        "provider_model": provider_model,
+        "message_count": len(messages),
+        "roles": [m.get("role") for m in messages if isinstance(m, dict)],
+        "tool_call_count": _responses_tool_call_count(messages),
+        "has_tool_messages": any(isinstance(m, dict) and m.get("role") == "tool" for m in messages),
+        "tools_present": "tools" in payload,
+        "tool_choice": payload.get("tool_choice"),
+        "max_tokens": payload.get("max_tokens", payload.get("max_completion_tokens")),
+        "payload_size_bytes": len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")),
+        "endpoint": endpoint,
+    }
+    if duration is not None:
+        summary["duration"] = round(duration, 3)
+    return summary
+
+
+def _native_responses_enabled(cfg: dict) -> bool:
+    return bool(cfg.get("use_responses_api")) and not bool(cfg.get("force_chat")) and bool(cfg.get("native_responses_provider"))
+
+
+def _responses_input_item_types(input_value: Any) -> list[str]:
+    if isinstance(input_value, str):
+        return ["input_text"]
+    if isinstance(input_value, list):
+        item_types: list[str] = []
+        for item in input_value:
+            if isinstance(item, dict):
+                item_types.append(str(item.get("type") or item.get("role") or "message"))
+            else:
+                item_types.append(type(item).__name__)
+        return item_types
+    return [type(input_value).__name__]
+
+
+def _native_responses_payload_summary(
+    *,
+    endpoint: str,
+    requested_model: str,
+    provider_model: str,
+    payload: dict,
+) -> dict:
+    reasoning = payload.get("reasoning")
+    effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+    return {
+        "endpoint": endpoint,
+        "requested_model": requested_model,
+        "provider_model": provider_model,
+        "input_item_types": _responses_input_item_types(payload.get("input")),
+        "roles": _responses_observed_roles(payload.get("input")),
+        "tools_present": "tools" in payload,
+        "tool_choice": payload.get("tool_choice"),
+        "reasoning_effort": effort,
+        "stream": bool(payload.get("stream")),
+        "payload_size_bytes": _json_bytes(payload),
+    }
+
+
+def _log_deepseek_tools_payload(
+    *,
+    route: str,
+    requested_model: str,
+    provider_model: str,
+    endpoint: str,
+    payload: dict,
+) -> None:
+    if "api.deepseek.com" not in endpoint or "tools" not in payload:
+        return
+    log.debug(
+        "[%s] deepseek_tools_payload_summary=%s",
+        route,
+        _native_responses_payload_summary(
+            endpoint=endpoint,
+            requested_model=requested_model,
+            provider_model=provider_model,
+            payload=payload,
+        ),
+    )
+
+def _append_responses_message(messages: list[dict], item: dict, *, preserve_developer: bool = False) -> int:
+    role = item.get("role")
+    if role not in ("system", "user", "assistant", "developer"):
+        raise HTTPException(status_code=400, detail="Responses input messages require role system, developer, user or assistant")
+    developer_converted = 0
+    if role == "developer" and not preserve_developer:
+        role = "system"
+        developer_converted = 1
+    content = item.get("content")
+    if isinstance(content, str):
+        messages.append({"role": role, "content": content})
+        return developer_converted
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                raise HTTPException(status_code=400, detail="Responses content parts must be objects")
+            part_type = part.get("type")
+            if part_type not in ("input_text", "output_text", "text"):
+                raise HTTPException(status_code=400, detail=f"Responses content part type '{part_type}' is not supported")
+            parts.append(str(part.get("text") or ""))
+        messages.append({"role": role, "content": "\n".join(parts)})
+        return developer_converted
+    raise HTTPException(status_code=400, detail="Responses input message content must be text")
+
+
+def _responses_tools_to_native_result(tools: list | None, requested_model: str | None = None) -> tool_compat.ToolTranslationResult:
+    if not tools:
+        return tool_compat.ToolTranslationResult(tools=[])
+    _log_tool_schema_stats("responses_native", requested_model, tools)
+    try:
+        result = tool_compat.translate_tools_for_native_responses(
+            tools,
+            _tool_capabilities_from_cfg({"native_responses_provider": True, "supports_strict_tools": True}, native_responses=True),
+            max_tools=MAX_TOOLS,
+            max_schema_bytes=MAX_TOOL_SCHEMA_BYTES,
+        )
+    except tool_compat.ToolCompatibilityError as exc:
+        raise _tool_compat_http_error(exc)
+    return result
+
+
+def _responses_tools_to_native(tools: list | None, requested_model: str | None = None) -> list[dict] | None:
+    result = _responses_tools_to_native_result(tools, requested_model)
+    return result.tools or None
+
+def _responses_tool_choice_to_native(tool_choice: Any) -> Any | None:
+    if tool_choice is None:
+        return None
+    if tool_choice in ("auto", "none", "required"):
+        return tool_choice
+    if not isinstance(tool_choice, dict):
+        raise HTTPException(status_code=400, detail="Unsupported tool_choice")
+    if tool_choice.get("type") != "function":
+        raise HTTPException(status_code=400, detail="Unsupported tool_choice type")
+    fn = tool_choice.get("function")
+    name = fn.get("name") if isinstance(fn, dict) else tool_choice.get("name")
+    return {"type": "function", "name": _validate_function_name(name)}
+
+def _native_responses_should_send_tool_choice(cfg: dict, reasoning: Any | None) -> bool:
+    if cfg.get("supports_tool_choice_in_thinking") is not False:
+        return True
+    thinking_enabled = reasoning is not None or str(cfg.get("thinking_default") or "").lower() == "enabled"
+    return not thinking_enabled
+
+
+def _responses_native_input(input_value: Any) -> Any:
+    if isinstance(input_value, str):
+        if not input_value.strip():
+            raise HTTPException(status_code=400, detail="Responses input string cannot be empty")
+        return input_value
+    if not isinstance(input_value, list) or not input_value:
+        raise HTTPException(status_code=400, detail="Responses input must be a string or a non-empty list")
+    native: list[Any] = []
+    for item in input_value:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="Responses input items must be objects")
+        item_type = item.get("type")
+        if item_type == "function_call":
+            if not str(item.get("call_id") or ""):
+                raise HTTPException(status_code=400, detail="function_call requires call_id")
+            _validate_function_name(item.get("name"))
+            if "arguments" in item:
+                _serialize_function_payload(item.get("arguments") or "", max_bytes=MAX_FUNCTION_ARGUMENTS_BYTES, field_name="function arguments")
+        if item_type == "function_call_output":
+            if not str(item.get("call_id") or ""):
+                raise HTTPException(status_code=400, detail="function_call_output requires call_id")
+            _serialize_function_payload(item.get("output") or "", max_bytes=MAX_FUNCTION_OUTPUT_BYTES, field_name="function output")
+        native.append(dict(item))
+    return native
+
+
+def _normalize_native_response_model(value: Any, requested_model: str) -> Any:
+    if isinstance(value, dict):
+        copied = dict(value)
+        if copied.get("object") == "response" or "output" in copied or "output_text" in copied:
+            copied["model"] = requested_model
+        response = copied.get("response")
+        if isinstance(response, dict):
+            response_copy = dict(response)
+            response_copy["model"] = requested_model
+            copied["response"] = response_copy
+        return copied
+    return value
+
+
+def _native_response_output_text(response: dict) -> str:
+    text = response.get("output_text")
+    if isinstance(text, str):
+        return text
+    out: list[str] = []
+    for item in response.get("output") or []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for part in item.get("content") or []:
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                out.append(str(part.get("text") or ""))
+    return "".join(out)
+
+
+def _native_response_sse_event(event: str, payload: dict, requested_model: str) -> str:
+    normalized = _normalize_native_response_model(payload, requested_model)
+    return _sse_event(event, normalized if isinstance(normalized, dict) else payload)
+
+def _responses_function_call_to_chat_message(item: dict) -> dict:
+    call_id = str(item.get("call_id") or item.get("id") or "")
+    if not call_id:
+        raise HTTPException(status_code=400, detail="function_call requires call_id")
+    name = _validate_function_name(item.get("name"))
+    arguments = _serialize_function_payload(item.get("arguments") or "", max_bytes=MAX_FUNCTION_ARGUMENTS_BYTES, field_name="function arguments")
+    return {
+        "role": "assistant",
+        "content": item["content"] if "content" in item else None,
+        "tool_calls": [{"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}],
+    }
+
+
+def _responses_function_output_to_chat_message(item: dict) -> dict:
+    call_id = str(item.get("call_id") or "")
+    if not call_id:
+        raise HTTPException(status_code=400, detail="function_call_output requires call_id")
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": _serialize_function_payload(item.get("output"), max_bytes=MAX_FUNCTION_OUTPUT_BYTES, field_name="function output"),
+    }
+
+
+def _chat_tool_calls_to_responses_items(tool_calls: Any, reverse_name_map: dict | None = None) -> list[dict]:
+    if not isinstance(tool_calls, list):
+        return []
+    if len(tool_calls) > MAX_TOOL_CALLS_PER_RESPONSE:
+        raise HTTPException(status_code=502, detail="Upstream returned too many tool calls")
+    items: list[dict] = []
+    for index, call in enumerate(tool_calls):
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") or {}
+        raw_arguments = fn.get("arguments") or ""
+        if len(str(raw_arguments).encode("utf-8")) > MAX_FUNCTION_ARGUMENTS_BYTES:
+            raise HTTPException(status_code=502, detail="Upstream function arguments exceed configured byte limit")
+        arguments = _serialize_function_payload(raw_arguments, max_bytes=MAX_FUNCTION_ARGUMENTS_BYTES, field_name="function arguments")
+        call_id = str(call.get("id") or f"call_{uuid4().hex}")
+        provider_name = str(fn.get("name") or "")
+        restored = tool_compat.restore_tool_call_name(provider_name, reverse_name_map)
+        item = {
+            "id": "fc_" + uuid4().hex,
+            "type": "function_call",
+            "status": "completed",
+            "call_id": call_id,
+            "name": restored["name"],
+            "arguments": arguments,
+        }
+        if restored.get("namespace"):
+            item["namespace"] = restored["namespace"]
+        items.append(item)
+    return items
+
+
+def _responses_payload_from_chat(model: str, upstream: dict, reverse_name_map: dict | None = None) -> dict:
+    now = int(time.time())
+    choice = ((upstream.get("choices") or [{}])[0] or {}) if isinstance(upstream, dict) else {}
+    message = choice.get("message") or {}
+    finish_reason = str(choice.get("finish_reason") or "stop").lower()
+    text = "" if message.get("content") is None else str(message.get("content"))
+    output: list[dict] = []
+    if text:
+        output.append({
+            "id": "msg_" + uuid4().hex,
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}],
+        })
+    output.extend(_chat_tool_calls_to_responses_items(message.get("tool_calls"), reverse_name_map))
+    status = "incomplete" if finish_reason == "length" else "completed"
+    response = {
+        "id": "resp_" + uuid4().hex,
+        "object": "response",
+        "created_at": now,
+        "status": status,
+        "model": model,
+        "output": output,
+        "output_text": text,
+        "usage": _convert_openai_usage(upstream.get("usage") if isinstance(upstream, dict) else None),
+    }
+    if status == "incomplete":
+        response["incomplete_details"] = {"reason": "max_output_tokens"}
+    return response
+
+
+
+def _responses_payload(model: str, text: str, usage: dict | None = None) -> dict:
+    now = int(time.time())
+    return {
+        "id": "resp_" + uuid4().hex,
+        "object": "response",
+        "created_at": now,
+        "status": "completed",
+        "model": model,
+        "output": [
+            {
+                "id": "msg_" + uuid4().hex,
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            }
+        ],
+        "output_text": text,
+        "usage": usage or _usage_zero(),
+    }
+
+
+def _responses_stream_sequence(model: str, deltas: list[str], usage: dict | None = None, error: dict | None = None):
+    response_id = "resp_" + uuid4().hex
+    message_id = "msg_" + uuid4().hex
+    created_at = int(time.time())
+    sequence = 0
+    text = ""
+
+    response_started = {
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "status": "in_progress",
+        "model": model,
+        "output": [],
+    }
+    yield _sse_event("response.created", {
+        "type": "response.created",
+        "sequence_number": sequence,
+        "response": response_started,
+    })
+    sequence += 1
+    yield _sse_event("response.in_progress", {
+        "type": "response.in_progress",
+        "sequence_number": sequence,
+        "response": response_started,
+    })
+    sequence += 1
+
+    item = {
+        "id": message_id,
+        "type": "message",
+        "status": "in_progress",
+        "role": "assistant",
+        "content": [],
+    }
+    yield _sse_event("response.output_item.added", {
+        "type": "response.output_item.added",
+        "sequence_number": sequence,
+        "output_index": 0,
+        "item": item,
+    })
+    sequence += 1
+    yield _sse_event("response.content_part.added", {
+        "type": "response.content_part.added",
+        "sequence_number": sequence,
+        "item_id": message_id,
+        "output_index": 0,
+        "content_index": 0,
+        "part": {"type": "output_text", "text": ""},
+    })
+    sequence += 1
+
+    if error:
+        yield _sse_event("error", {"type": "error", "sequence_number": sequence, "error": error})
+        return
+
+    for delta in deltas:
+        if not delta:
+            continue
+        text += delta
+        yield _sse_event("response.output_text.delta", {
+            "type": "response.output_text.delta",
+            "sequence_number": sequence,
+            "item_id": message_id,
+            "output_index": 0,
+            "content_index": 0,
+            "delta": delta,
+        })
+        sequence += 1
+
+    yield _sse_event("response.output_text.done", {
+        "type": "response.output_text.done",
+        "sequence_number": sequence,
+        "item_id": message_id,
+        "output_index": 0,
+        "content_index": 0,
+        "text": text,
+    })
+    sequence += 1
+    content_part = {"type": "output_text", "text": text}
+    yield _sse_event("response.content_part.done", {
+        "type": "response.content_part.done",
+        "sequence_number": sequence,
+        "item_id": message_id,
+        "output_index": 0,
+        "content_index": 0,
+        "part": content_part,
+    })
+    sequence += 1
+    completed_item = {
+        "id": message_id,
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [content_part],
+    }
+    yield _sse_event("response.output_item.done", {
+        "type": "response.output_item.done",
+        "sequence_number": sequence,
+        "output_index": 0,
+        "item": completed_item,
+    })
+    sequence += 1
+    completed_response = _responses_payload(model, text, usage)
+    completed_response["id"] = response_id
+    completed_response["created_at"] = created_at
+    completed_response["output"][0]["id"] = message_id
+    yield _sse_event("response.completed", {
+        "type": "response.completed",
+        "sequence_number": sequence,
+        "response": completed_response,
+    })
+
+
+async def _remote_chat_stream_parts(
+    messages: list[dict],
+    model: str,
+    temperature: float | None,
+    max_tokens_override: int | None = None,
+    source_route: str = "responses",
+    tools: list[dict] | None = None,
+    tool_choice: Any | None = None,
+    reasoning: Any | None = None,
+):
+    cfg = _model_cfg(model)
+    base0 = (cfg.get("base_url") or cfg.get("api_base") or "").rstrip("/")
+    if not base0:
+        raise HTTPException(502, f"Remote config missing base_url/api_base for model '{model}'")
+    physical_model, provider_model, explicit_provider_model = _remote_model_ids(model, cfg, base0)
+    if not explicit_provider_model and provider_model != model:
+        cfg.update(_remote_overrides(provider_model))
+    cfg_phys = (_REMOTE_CONF.get("models") or {}).get(provider_model, {})
+    if not explicit_provider_model and cfg_phys:
+        cfg.update(cfg_phys)
+
+    base = (cfg.get("base_url") or cfg.get("api_base") or "").rstrip("/")
+    physical_model, provider_model, explicit_provider_model = _remote_model_ids(model, cfg, base)
+    api_env = cfg.get("api_key_env", "OPENAI_API_KEY")
+    api_key = os.getenv(api_env, "").strip()
+    if not base or not api_key:
+        raise HTTPException(502, f"Remote config/keys missing for model '{model}' (base={base}, env={api_env})")
+
+    prov = _provider_name(base)
+    is_modern = provider_model.startswith(("gpt-5", "o1", "o3", "o4"))
+    temp = temperature if temperature is not None else cfg.get("temperature")
+    top_p = cfg.get("top_p")
+    max_tokens = max_tokens_override if max_tokens_override is not None else cfg.get("max_tokens")
+    endpoint = f"{base}/chat/completions"
+    payload = {"model": provider_model, "messages": messages, "stream": True}
+    if tools:
+        payload["tools"] = tools
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
+    if reasoning is not None and cfg.get("supports_reasoning"):
+        payload["reasoning"] = reasoning
+    if max_tokens is not None:
+        if prov == "openai" and is_modern:
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload["max_tokens"] = max_tokens
+    if not (prov == "openai" and is_modern):
+        if temp is not None:
+            payload["temperature"] = temp
+        if top_p is not None:
+            payload["top_p"] = top_p
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    if "openrouter.ai" in base:
+        headers.setdefault("HTTP-Referer", "https://openwebui.local")
+        headers.setdefault("X-Title", "Adapter Bridge")
+
+    timeout_s = cfg.get("timeout")
+    timeout = httpx.Timeout(timeout_s) if timeout_s else TIMEOUT_REMOTE
+    log.info(
+        "[remote_chat_stream] route=%s requested_model=%s physical_model=%s provider_model=%s base_url=%s api_key_env=%s endpoint=%s stream=true tools=%s tool_choice=%s",
+        source_route, model, physical_model, provider_model, base, api_env, endpoint, bool(tools), tool_choice,
+    )
+    log.debug("[remote_chat_stream] payload_summary=%s", _chat_payload_debug_summary(
+        requested_model=model,
+        provider_model=provider_model,
+        messages=messages,
+        payload=payload,
+        endpoint=endpoint,
+    ))
+
+    _log_deepseek_tools_payload(
+        route="remote_chat_stream",
+        requested_model=model,
+        provider_model=provider_model,
+        endpoint=endpoint,
+        payload=payload,
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", endpoint, json=payload, headers=headers) as resp:
+            if resp.status_code >= 400:
+                body = ""
+                try:
+                    body = (await resp.aread()).decode("utf-8", errors="replace")
+                except Exception:
+                    pass
+                raise HTTPException(
+                    status_code=resp.status_code,
+                    detail={"message": f"Upstream error {resp.status_code}", "endpoint": endpoint, "body": body[:500]},
+                )
+            async for line in resp.aiter_lines():
+                line = (line or "").strip()
+                if not line:
+                    continue
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if line == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(line)
+                except Exception:
+                    continue
+                usage = chunk.get("usage")
+                if usage:
+                    yield {"usage": _convert_openai_usage(usage)}
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                choice0 = choices[0] or {}
+                finish_reason = choice0.get("finish_reason")
+                if finish_reason:
+                    yield {"finish_reason": str(finish_reason)}
+                delta_obj = choice0.get("delta") or {}
+                delta = delta_obj.get("content")
+                if delta:
+                    yield {"delta": str(delta)}
+                for tool_delta in delta_obj.get("tool_calls") or []:
+                    if not isinstance(tool_delta, dict):
+                        continue
+                    fn = tool_delta.get("function") or {}
+                    yield {
+                        "tool_call_delta": {
+                            "index": int(tool_delta.get("index") or 0),
+                            "id": tool_delta.get("id"),
+                            "type": tool_delta.get("type") or "function",
+                            "name": fn.get("name"),
+                            "arguments": fn.get("arguments"),
+                        }
+                    }
+
+
+async def _responses_stream_generator(
+    *,
+    requested_model: str,
+    messages: list[dict],
+    metadata: dict | None = None,
+    max_output_tokens: int | None = None,
+    tools: list[dict] | None = None,
+    tool_choice: Any | None = None,
+    reasoning: Any | None = None,
+    reverse_name_map: dict | None = None,
+):
+    canonical = _resolve_model_id(requested_model)
+    response_id = "resp_" + uuid4().hex
+    message_id = "msg_" + uuid4().hex
+    created_at = int(time.time())
+    sequence = 0
+    output_text = ""
+    usage: dict | None = None
+    finish_reason = "stop"
+    started = False
+    text_started = False
+    output_items: list[dict] = []
+    tool_states: dict[int, dict] = {}
+
+    def next_event(event: str, payload: dict):
+        nonlocal sequence
+        payload.setdefault("sequence_number", sequence)
+        sequence += 1
+        return _sse_event(event, payload)
+
+    def completed_response(status: str = "completed") -> dict:
+        response = {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": status,
+            "model": requested_model,
+            "output": output_items,
+            "output_text": output_text,
+            "usage": usage or _usage_zero(),
+        }
+        if status == "incomplete":
+            response["incomplete_details"] = {"reason": "max_output_tokens"}
+        return response
+
+    async def ensure_text_item():
+        nonlocal text_started
+        if text_started:
+            return
+        text_started = True
+        output_index = len(output_items)
+        yield next_event("response.output_item.added", {
+            "type": "response.output_item.added",
+            "output_index": output_index,
+            "item": {
+                "id": message_id,
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": [],
+            },
+        })
+        yield next_event("response.content_part.added", {
+            "type": "response.content_part.added",
+            "item_id": message_id,
+            "output_index": output_index,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": ""},
+        })
+
+    async def emit_text_delta(delta: str):
+        nonlocal output_text
+        async for event in ensure_text_item():
+            yield event
+        output_index = next((i for i, item in enumerate(output_items) if item.get("id") == message_id), None)
+        if output_index is None:
+            output_index = len(output_items)
+        output_text += delta
+        yield next_event("response.output_text.delta", {
+            "type": "response.output_text.delta",
+            "item_id": message_id,
+            "output_index": output_index,
+            "content_index": 0,
+            "delta": delta,
+        })
+
+    async def emit_tool_delta(tool_delta: dict):
+        index = int(tool_delta.get("index") or 0)
+        state = tool_states.get(index)
+        if state is None:
+            state = {
+                "item_id": "fc_" + uuid4().hex,
+                "call_id": str(tool_delta.get("id") or f"call_{uuid4().hex}"),
+                "name": "",
+                "arguments": "",
+                "output_index": len(output_items) + len(tool_states),
+                "added": False,
+            }
+            tool_states[index] = state
+        if tool_delta.get("id"):
+            state["call_id"] = str(tool_delta.get("id"))
+        if tool_delta.get("name"):
+            state["name"] += str(tool_delta.get("name"))
+        if not state["added"]:
+            state["added"] = True
+            yield next_event("response.output_item.added", {
+                "type": "response.output_item.added",
+                "output_index": state["output_index"],
+                "item": {
+                    "id": state["item_id"],
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": state["call_id"],
+                    "name": state["name"],
+                    "arguments": "",
+                },
+            })
+        arg_delta = tool_delta.get("arguments")
+        if arg_delta:
+            arg_delta = str(arg_delta)
+            if len((state["arguments"] + arg_delta).encode("utf-8")) > MAX_FUNCTION_ARGUMENTS_BYTES:
+                raise HTTPException(status_code=502, detail="Upstream function arguments exceed configured byte limit")
+            state["arguments"] += arg_delta
+            yield next_event("response.function_call_arguments.delta", {
+                "type": "response.function_call_arguments.delta",
+                "item_id": state["item_id"],
+                "output_index": state["output_index"],
+                "delta": arg_delta,
+            })
+
+    try:
+        started = True
+        response_started = {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": "in_progress",
+            "model": requested_model,
+            "output": [],
+        }
+        yield next_event("response.created", {"type": "response.created", "response": response_started})
+        yield next_event("response.in_progress", {"type": "response.in_progress", "response": response_started})
+
+        if _is_local_model(requested_model):
+            log.info("[responses_stream] requested_model=%s backend=local stream_fallback=single_delta", requested_model)
+            text = await _route_text_completion(
+                requested_model=requested_model,
+                messages=messages,
+                metadata=metadata,
+                max_output_tokens=max_output_tokens,
+                source_route="responses",
+            )
+            async for event in emit_text_delta(str(text)):
+                yield event
+        elif not _is_known_remote_model(requested_model, canonical):
+            raise HTTPException(status_code=400, detail=f"Unknown model '{requested_model}'")
+        else:
+            cfg = _model_cfg(canonical)
+            if tools and cfg.get("supports_stream") is False:
+                raise HTTPException(status_code=400, detail=f"Model '{requested_model}' does not support streamed tool calls")
+            if cfg.get("supports_stream") is False:
+                log.info("[responses_stream] requested_model=%s stream_fallback=single_delta", requested_model)
+                text = await _route_text_completion(
+                    requested_model=requested_model,
+                    messages=messages,
+                    metadata=metadata,
+                    max_output_tokens=max_output_tokens,
+                    source_route="responses",
+                )
+                async for event in emit_text_delta(str(text)):
+                    yield event
+            else:
+                async for part in _remote_chat_stream_parts(
+                    messages=messages,
+                    model=canonical,
+                    temperature=None,
+                    max_tokens_override=max_output_tokens,
+                    source_route="responses",
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    reasoning=reasoning,
+                ):
+                    if "usage" in part:
+                        usage = part["usage"]
+                    if "finish_reason" in part:
+                        finish_reason = str(part["finish_reason"]).lower()
+                    delta = part.get("delta")
+                    if delta:
+                        async for event in emit_text_delta(delta):
+                            yield event
+                    tool_delta = part.get("tool_call_delta")
+                    if tool_delta:
+                        async for event in emit_tool_delta(tool_delta):
+                            yield event
+
+        if usage is None:
+            log.debug("[responses_stream] usage_unavailable=true requested_model=%s", requested_model)
+            usage = _usage_zero()
+
+        if text_started:
+            output_index = len(output_items)
+            yield next_event("response.output_text.done", {
+                "type": "response.output_text.done",
+                "item_id": message_id,
+                "output_index": output_index,
+                "content_index": 0,
+                "text": output_text,
+            })
+            content_part = {"type": "output_text", "text": output_text}
+            yield next_event("response.content_part.done", {
+                "type": "response.content_part.done",
+                "item_id": message_id,
+                "output_index": output_index,
+                "content_index": 0,
+                "part": content_part,
+            })
+            completed_item = {
+                "id": message_id,
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [content_part],
+            }
+            output_items.append(completed_item)
+            yield next_event("response.output_item.done", {
+                "type": "response.output_item.done",
+                "output_index": output_index,
+                "item": completed_item,
+            })
+
+        for index in sorted(tool_states):
+            state = tool_states[index]
+            yield next_event("response.function_call_arguments.done", {
+                "type": "response.function_call_arguments.done",
+                "item_id": state["item_id"],
+                "output_index": state["output_index"],
+                "arguments": state["arguments"],
+            })
+            restored = tool_compat.restore_tool_call_name(state["name"], reverse_name_map)
+            item = {
+                "id": state["item_id"],
+                "type": "function_call",
+                "status": "completed",
+                "call_id": state["call_id"],
+                "name": restored["name"],
+                "arguments": state["arguments"],
+            }
+            if restored.get("namespace"):
+                item["namespace"] = restored["namespace"]
+            output_items.append(item)
+            yield next_event("response.output_item.done", {
+                "type": "response.output_item.done",
+                "output_index": state["output_index"],
+                "item": item,
+            })
+
+        status = "incomplete" if finish_reason == "length" else "completed"
+        yield next_event("response.completed", {
+            "type": "response.completed",
+            "response": completed_response(status),
+        })
+    except asyncio.CancelledError:
+        log.debug("[responses_stream] client disconnected requested_model=%s", requested_model)
+        raise
+    except HTTPException as exc:
+        if started:
+            yield _sse_event("error", {"type": "error", "error": {"status_code": exc.status_code, "detail": exc.detail}})
+        else:
+            raise
+    except Exception as exc:
+        log.warning("[responses_stream] error requested_model=%s err=%s", requested_model, exc)
+        yield _sse_event("error", {"type": "error", "error": {"message": str(exc)}})
+
+def _is_known_remote_model(model: str, canonical: str) -> bool:
+    models_conf = _REMOTE_CONF.get("models") or {}
+    if model in models_conf or canonical in models_conf:
+        return True
+    if model in REMOTE_MODELS_SET or canonical in REMOTE_MODELS_SET:
+        return True
+    cfg = MODEL_REGISTRY.get(canonical)
+    return bool(cfg and cfg.get("backend") == "openai")
+
+
+async def _route_text_completion(
+    *,
+    requested_model: str,
+    messages: list[dict],
+    temperature: float | None = None,
+    metadata: dict | None = None,
+    response_format: dict | None = None,
+    max_output_tokens: int | None = None,
+    source_route: str = "chat/completions",
+) -> str:
+    canonical = _resolve_model_id(requested_model)
+    meta = metadata or {}
+
+    if _is_local_model(requested_model):
+        if not messages:
+            raise HTTPException(status_code=400, detail="No messages provided")
+        user_prompt = messages[-1].get("content") or ""
+        log.info("[route_text_completion] route=%s requested_model=%s backend=local", source_route, requested_model)
+        return str(await _local_chat(
+            user_prompt,
+            route_hint=requested_model,
+            temperature=temperature,
+            meta=meta,
+            messages=messages,
+            use_memory=False,
+        ))
+
+    cfg = MODEL_REGISTRY.get(canonical)
+    if cfg and cfg.get("backend") == "gpt4all":
+        if not messages:
+            raise HTTPException(status_code=400, detail="No messages provided")
+        user_prompt = messages[-1].get("content") or ""
+        log.info("[route_text_completion] route=%s requested_model=%s canonical=%s backend=local-registry", source_route, requested_model, canonical)
+        return str(await _local_chat(
+            user_prompt,
+            route_hint=canonical,
+            temperature=temperature,
+            meta=meta,
+            messages=messages,
+            use_memory=False,
+        ))
+
+    if not _is_known_remote_model(requested_model, canonical):
+        raise HTTPException(status_code=400, detail=f"Unknown model '{requested_model}'")
+
+    log.info("[route_text_completion] route=%s requested_model=%s canonical=%s backend=remote", source_route, requested_model, canonical)
+    return await _remote_chat(
+        messages=messages,
+        model=canonical,
+        temperature=temperature,
+        response_format=response_format,
+        max_tokens_override=max_output_tokens,
+        source_route=source_route,
+    )
+
+
 @app.get("/ping")
 async def ping():
     return {"status": "ok"}
 
 
+@app.post("/v1/responses")
+async def responses_create(
+    req: ResponsesReq,
+    authorization: Annotated[str | None, Header()] = None,
+):
+    _check_adapter_auth(authorization)
+
+    if req.previous_response_id:
+        raise HTTPException(
+            status_code=400,
+            detail="previous_response_id is not supported in stateless mode; resend the complete input history",
+        )
+
+    canonical = _resolve_model_id(req.model)
+    cfg = _model_cfg(canonical)
+    native_responses = _native_responses_enabled(cfg)
+    if native_responses:
+        if (req.tools or _input_contains_tool_items(req.input)) and not _tool_capability(cfg, "supports_tools"):
+            raise HTTPException(status_code=400, detail=f"Model '{req.model}' does not declare supports_tools=true")
+        if req.stream:
+            return StreamingResponse(
+                _remote_responses_native_stream(
+                    requested_model=req.model,
+                    canonical_model=canonical,
+                    input_value=req.input,
+                    instructions=req.instructions,
+                    tools=req.tools,
+                    tool_choice=req.tool_choice,
+                    reasoning=getattr(req, "reasoning", None),
+                    max_output_tokens=req.max_output_tokens,
+                    parallel_tool_calls=getattr(req, "parallel_tool_calls", None),
+                    metadata=req.metadata,
+                ),
+                media_type="text/event-stream",
+                headers=_responses_stream_headers(),
+            )
+        raw_native = await _remote_responses_native(
+            requested_model=req.model,
+            canonical_model=canonical,
+            input_value=req.input,
+            instructions=req.instructions,
+            tools=req.tools,
+            tool_choice=req.tool_choice,
+            reasoning=getattr(req, "reasoning", None),
+            max_output_tokens=req.max_output_tokens,
+            parallel_tool_calls=getattr(req, "parallel_tool_calls", None),
+            metadata=req.metadata,
+        )
+        return raw_native
+
+    final_tool_result_turn = _responses_final_tool_result_turn(req.input, req.tool_choice)
+    chat_tool_result = _responses_tools_to_chat_result(req.tools, cfg, req.model, req.tool_choice)
+    chat_tools = chat_tool_result.tools or None
+    reverse_name_map = chat_tool_result.reverse_name_map
+    chat_tool_choice = _responses_tool_choice_to_chat(req.tool_choice, cfg)
+    if final_tool_result_turn:
+        if chat_tools:
+            log.debug("[responses_tools] omitting tools on final tool-result turn requested_model=%s", req.model)
+        chat_tools = None
+        chat_tool_choice = None
+    effective_max_output_tokens = _responses_effective_max_tokens(req.max_output_tokens, final_tool_result_turn)
+    if (req.tools or _input_contains_tool_items(req.input)) and not _tool_capability(cfg, "supports_tools"):
+        raise HTTPException(status_code=400, detail=f"Model '{req.model}' does not declare supports_tools=true")
+
+    messages = _responses_input_to_messages(req.input, req.instructions, cfg=cfg, requested_model=req.model)
+
+    if req.stream:
+        return StreamingResponse(
+            _responses_stream_generator(
+                requested_model=req.model,
+                messages=messages,
+                metadata=req.metadata,
+                max_output_tokens=effective_max_output_tokens,
+                tools=chat_tools,
+                tool_choice=chat_tool_choice,
+                reasoning=getattr(req, "reasoning", None),
+                reverse_name_map=reverse_name_map,
+            ),
+            media_type="text/event-stream",
+            headers=_responses_stream_headers(),
+        )
+
+    if _is_local_model(req.model):
+        if req.tools or _input_contains_tool_items(req.input):
+            raise HTTPException(status_code=400, detail=f"Model '{req.model}' does not declare supports_tools=true")
+        text = await _route_text_completion(
+            requested_model=req.model,
+            messages=messages,
+            metadata=req.metadata,
+            max_output_tokens=effective_max_output_tokens,
+            source_route="responses",
+        )
+        return _responses_payload(req.model, str(text))
+
+    if not _is_known_remote_model(req.model, canonical):
+        raise HTTPException(status_code=400, detail=f"Unknown model '{req.model}'")
+
+    raw = await _remote_chat(
+        messages=messages,
+        model=canonical,
+        temperature=None,
+        max_tokens_override=effective_max_output_tokens,
+        source_route="responses",
+        tools=chat_tools,
+        tool_choice=chat_tool_choice,
+        reasoning=getattr(req, "reasoning", None),
+        return_raw_response=True,
+    )
+    return _responses_payload_from_chat(req.model, raw, reverse_name_map)
+
+
 # -----------------------------------------------------------------------------
 # REST: Chat
 # -----------------------------------------------------------------------------
-
 @app.post("/v1/chat/completions")
 async def chat_completions(
     req: ChatReq,
@@ -2674,7 +4266,7 @@ async def chat_completions(
             # ─────────────────────────────────────────────
             # 1er appel remote (en général gpt-5-mini)
             # ─────────────────────────────────────────────
-            
+
             raw = None
             parsed = None
             last_exc = None
@@ -2820,9 +4412,9 @@ async def chat_completions(
                 if parsed is not None:
                     used_model = m
                     break
-            
+
                 log.warning("[adapter][json-model] parse/repair failed model=%s -> next fallback", m)
-            
+
             if raw is None:
                 if last_exc is not None:
                     raise last_exc
@@ -2923,7 +4515,7 @@ async def chat_completions(
     #    content = str(text)
 
     # ----------------------------------------------------------------
-    #  CAS utilisé par OpenWebUI, PAPERLESS, APPLOWY, etc. 
+    #  CAS utilisé par OpenWebUI, PAPERLESS, APPLOWY, etc.
     #  pour modele remotes et locaux (gpt-5-mini, local-llama3, etc.) -----
     # ----------------------------------------------------------------
 
@@ -3033,7 +4625,7 @@ async def documents_analyze(
         async with httpx.AsyncClient(timeout=TIMEOUT_LOCAL) as c:
             if mt.startswith("image/"):
                 # ton serveur traite l'image via /ocr
-                r = await c.post(f"{LOCAL_BASE}/ocr", files={"file": (name, content, mt)}, headers=headers)        
+                r = await c.post(f"{LOCAL_BASE}/ocr", files={"file": (name, content, mt)}, headers=headers)
                 r.raise_for_status()
                 return r.json().get("text","")
             if mt == "application/pdf":
@@ -3362,7 +4954,7 @@ async def ocr_convert(
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"OCR upstream error: {e}")
-    
+
 # -----------------------------------------------------------------------------
 # Transcriptions
 #------------------------------------------------------------------------------
