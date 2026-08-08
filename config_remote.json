@@ -597,6 +597,33 @@
         "source_url": "https://openrouter.ai/mistralai/mistral-7b-instruct",
         "checked_at": "2026-03-10"
       }
+    },
+    "moonshotai/kimi-k3": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "use_responses_api": false,
+      "force_chat": true,
+      "temperature": 0.2,
+      "top_p": 0.95,
+      "max_tokens": 66000,
+      "supports_stream": true,
+      "supports_tools": true,
+      "supports_parallel_tool_calls": true,
+      "supports_strict_tools": false,
+      "supports_developer_role": false,
+      "context_window": 1000000,
+      "pricing": {
+        "currency": "USD",
+        "unit": "per_1m_tokens",
+        "input": 3.0,
+        "cached_input": 0.30,
+        "output": 15.0,
+        "request": null,
+        "image": null,
+        "source_type": "openrouter_model_page",
+        "source_url": "https://openrouter.ai/moonshotai/kimi-k3",
+        "checked_at": "2026-08-07"
+      }
     }
   }
 }
