@@ -2908,6 +2908,39 @@ def _sse_event(event: str, payload: dict) -> str:
 def _responses_stream_headers() -> dict:
     return {"Cache-Control": "no-cache", "Connection": "keep-alive"}
 
+def _chat_stream_headers() -> dict:
+    return {"Cache-Control": "no-cache", "Connection": "keep-alive"}
+
+
+def _chat_sse_data(payload: dict | str) -> str:
+    if payload == "[DONE]":
+        return "data: [DONE]\n\n"
+    return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+def _chat_completion_chunk(
+    *,
+    chunk_id: str,
+    created: int,
+    model: str,
+    delta: dict | None = None,
+    finish_reason: str | None = None,
+) -> dict:
+    return {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta or {},
+                "finish_reason": finish_reason,
+            }
+        ],
+    }
+
+
 def _json_bytes(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
@@ -3546,6 +3579,7 @@ async def _remote_chat_stream_parts(
     tools: list[dict] | None = None,
     tool_choice: Any | None = None,
     reasoning: Any | None = None,
+    response_format: dict | None = None,
 ):
     cfg = _model_cfg(model)
     base0 = (cfg.get("base_url") or cfg.get("api_base") or "").rstrip("/")
@@ -3578,6 +3612,11 @@ async def _remote_chat_stream_parts(
         payload["tool_choice"] = tool_choice
     if reasoning is not None and cfg.get("supports_reasoning"):
         payload["reasoning"] = reasoning
+    if prov == "openai":
+        if response_format is not None:
+            payload["response_format"] = _stricten_response_format(response_format)
+        elif cfg.get("json_mode", False):
+            payload["response_format"] = {"type": "json_object"}
     if max_tokens is not None:
         if prov == "openai" and is_modern:
             payload["max_completion_tokens"] = max_tokens
@@ -4123,6 +4162,139 @@ async def responses_create(
     return _responses_payload_from_chat(req.model, raw, reverse_name_map)
 
 
+async def _chat_completions_stream_generator(
+    *,
+    requested_model: str,
+    canonical_model: str,
+    messages: list[dict],
+    temperature: float | None = None,
+    metadata: dict | None = None,
+    response_format: dict | None = None,
+    max_tokens_override: int | None = None,
+    tools: list[dict] | None = None,
+    tool_choice: Any | None = None,
+    reasoning: Any | None = None,
+    app_id: str | None = None,
+    conversation_id: str | None = None,
+):
+    chunk_id = "chatcmpl_" + uuid4().hex
+    created = int(time.time())
+    finish_reason = "stop"
+
+    def emit(delta: dict | None = None, final_reason: str | None = None) -> str:
+        return _chat_sse_data(_chat_completion_chunk(
+            chunk_id=chunk_id,
+            created=created,
+            model=requested_model,
+            delta=delta,
+            finish_reason=final_reason,
+        ))
+
+    async def emit_synthetic_text(text: str):
+        yield emit({"role": "assistant"})
+        if text:
+            yield emit({"content": text})
+        yield emit({}, finish_reason)
+        yield _chat_sse_data("[DONE]")
+
+    try:
+        cfg = MODEL_REGISTRY.get(canonical_model)
+        stream_messages = messages
+        if cfg and cfg.get("json_mode", False):
+            stream_messages = apply_json_constraint_to_messages([dict(m) for m in messages])
+
+        if cfg and cfg.get("backend") == "gpt4all":
+            user_prompt = stream_messages[-1].get("content") if stream_messages else ""
+            text = await _local_chat(
+                user_prompt,
+                route_hint=canonical_model,
+                temperature=temperature,
+                meta=metadata or {},
+            )
+            async for event in emit_synthetic_text(str(text)):
+                yield event
+            return
+
+        if _is_local_model(requested_model):
+            user_prompt = stream_messages[-1].get("content") if stream_messages else ""
+            meta = metadata or {}
+            meta.setdefault("memory_turns", 6)
+            text = await _local_chat(
+                user_prompt,
+                route_hint=requested_model,
+                temperature=temperature,
+                meta=meta,
+                app_id=app_id,
+                conversation_id=conversation_id,
+                messages=stream_messages,
+                use_memory=bool(conversation_id),
+            )
+            async for event in emit_synthetic_text(str(text)):
+                yield event
+            return
+
+        if not _is_known_remote_model(requested_model, canonical_model):
+            raise HTTPException(status_code=400, detail=f"Unknown model '{requested_model}'")
+
+        remote_cfg = _model_cfg(canonical_model)
+        if tools and remote_cfg.get("supports_stream") is False:
+            raise HTTPException(status_code=400, detail=f"Model '{requested_model}' does not support streamed tool calls")
+        if remote_cfg.get("supports_stream") is False:
+            text = await _route_text_completion(
+                requested_model=requested_model,
+                messages=stream_messages,
+                temperature=temperature,
+                metadata=metadata,
+                response_format=response_format,
+                max_output_tokens=max_tokens_override,
+                source_route="chat/completions",
+            )
+            async for event in emit_synthetic_text(str(text)):
+                yield event
+            return
+
+        yield emit({"role": "assistant"})
+        async for part in _remote_chat_stream_parts(
+            messages=stream_messages,
+            model=canonical_model,
+            temperature=temperature,
+            max_tokens_override=max_tokens_override,
+            source_route="chat/completions",
+            tools=tools,
+            tool_choice=tool_choice,
+            reasoning=reasoning,
+            response_format=response_format,
+        ):
+            if "finish_reason" in part:
+                finish_reason = str(part["finish_reason"] or "stop")
+            if "delta" in part:
+                yield emit({"content": str(part["delta"])})
+            if "tool_call_delta" in part:
+                tool_delta = part["tool_call_delta"]
+                fn = {}
+                if tool_delta.get("name") is not None:
+                    fn["name"] = tool_delta.get("name")
+                if tool_delta.get("arguments") is not None:
+                    fn["arguments"] = tool_delta.get("arguments")
+                out = {
+                    "index": tool_delta.get("index", 0),
+                    "type": tool_delta.get("type") or "function",
+                    "function": fn,
+                }
+                if tool_delta.get("id") is not None:
+                    out["id"] = tool_delta.get("id")
+                yield emit({"tool_calls": [out]})
+        yield emit({}, finish_reason)
+        yield _chat_sse_data("[DONE]")
+    except asyncio.CancelledError:
+        log.debug("[chat_stream] client disconnected requested_model=%s", requested_model)
+        raise
+    except Exception as exc:
+        log.warning("[chat_stream] error requested_model=%s err=%s", requested_model, exc)
+        yield _chat_sse_data({"error": {"message": str(exc)}})
+        yield _chat_sse_data("[DONE]")
+
+
 # -----------------------------------------------------------------------------
 # REST: Chat
 # -----------------------------------------------------------------------------
@@ -4207,6 +4379,31 @@ async def chat_completions(
     )
 
 
+
+    if req.stream:
+        if not messages:
+            raise HTTPException(status_code=400, detail="No messages provided")
+        return StreamingResponse(
+            _chat_completions_stream_generator(
+                requested_model=model,
+                canonical_model=canonical,
+                messages=messages,
+                temperature=temperature,
+                metadata=meta,
+                response_format=requested_response_format,
+                max_tokens_override=(
+                    getattr(req, "max_tokens", None)
+                    or getattr(req, "max_completion_tokens", None)
+                ),
+                tools=getattr(req, "tools", None),
+                tool_choice=getattr(req, "tool_choice", None),
+                reasoning=getattr(req, "reasoning", None),
+                app_id=app_id,
+                conversation_id=conv_id,
+            ),
+            media_type="text/event-stream",
+            headers=_chat_stream_headers(),
+        )
 
     # (option) activer mémoire si demandé par client
     use_memory = bool(meta.get("use_memory") or meta.get("memory") or meta.get("memory_id"))

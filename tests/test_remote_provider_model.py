@@ -203,6 +203,19 @@ def _parse_sse_events(raw):
         if event_name:
             events.append((event_name, data))
     return events
+def _parse_chat_sse_data(raw):
+    events = []
+    for block in raw.strip().split("\n\n"):
+        for line in block.splitlines():
+            if not line.startswith("data: "):
+                continue
+            data = line[len("data: "):]
+            if data == "[DONE]":
+                events.append("[DONE]")
+            else:
+                events.append(json.loads(data))
+    return events
+
 def _responses_req(**overrides):
     data = {
         "model": "deepseek/deepseek-v4-flash",
@@ -408,6 +421,13 @@ class RemoteProviderModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["model"], "deepseek-v4-flash")
 
     async def test_streaming_request_uses_provider_model_in_remote_payload(self):
+        FakeAsyncClient.stream_outcomes = [FakeStreamResponse(lines=[
+            'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"content":"hel"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"content":"lo"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            'data: [DONE]',
+        ])]
         req = types.SimpleNamespace(
             model="deepseek/deepseek-v4-flash",
             messages=[_Message("user", "hello")],
@@ -418,10 +438,159 @@ class RemoteProviderModelTests(unittest.IsolatedAsyncioTestCase):
         )
 
         resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+        raw = await _collect_stream(resp)
+        events = _parse_chat_sse_data(raw)
 
-        self.assertEqual(resp.model, "deepseek/deepseek-v4-flash")
-        payload = FakeAsyncClient.instances[-1].calls[-1]["json"]
+        self.assertEqual(resp.media_type, "text/event-stream")
+        self.assertEqual(resp.headers["Cache-Control"], "no-cache")
+        payload = FakeAsyncClient.instances[-1].stream_calls[-1]["json"]
+        self.assertTrue(payload["stream"])
         self.assertEqual(payload["model"], "deepseek-v4-flash")
+        self.assertEqual(events[0]["object"], "chat.completion.chunk")
+        self.assertEqual(events[0]["choices"][0]["delta"], {"role": "assistant"})
+        self.assertEqual([e["choices"][0]["delta"].get("content") for e in events if isinstance(e, dict) and e["choices"][0]["delta"].get("content")], ["hel", "lo"])
+        self.assertEqual(events[-2]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(events[-1], "[DONE]")
+
+    async def test_chat_completions_stream_true_gpt_4o_mini_returns_openai_sse(self):
+        self.adapter._REMOTE_CONF["models"]["gpt-4o-mini"] = {
+            "base_url": "https://api.openai.com/v1",
+            "api_key_env": "PLAIN_API_KEY",
+            "use_responses_api": False,
+            "force_chat": True,
+        }
+        FakeAsyncClient.stream_outcomes = [FakeStreamResponse(lines=[
+            'data: {"choices":[{"delta":{"content":"bonjour"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            'data: [DONE]',
+        ])]
+        req = types.SimpleNamespace(
+            model="gpt-4o-mini",
+            messages=[_Message("user", "hello")],
+            temperature=None,
+            stream=True,
+            metadata={},
+            response_format=None,
+        )
+
+        resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+        events = _parse_chat_sse_data(await _collect_stream(resp))
+
+        self.assertEqual(resp.media_type, "text/event-stream")
+        self.assertEqual(events[0]["object"], "chat.completion.chunk")
+        self.assertEqual(events[1]["choices"][0]["delta"], {"content": "bonjour"})
+        self.assertEqual(events[-2]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(events[-1], "[DONE]")
+        payload = FakeAsyncClient.instances[-1].stream_calls[-1]["json"]
+        self.assertEqual(payload["model"], "gpt-4o-mini")
+        self.assertTrue(payload["stream"])
+
+    async def test_chat_completions_stream_true_gpt_5_mini_returns_openai_sse(self):
+        self.adapter._REMOTE_CONF["models"]["gpt-5-mini"] = {
+            "base_url": "https://api.openai.com/v1",
+            "api_key_env": "PLAIN_API_KEY",
+            "use_responses_api": False,
+            "force_chat": True,
+        }
+        FakeAsyncClient.stream_outcomes = [FakeStreamResponse(lines=[
+            'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            'data: [DONE]',
+        ])]
+        req = types.SimpleNamespace(
+            model="gpt-5-mini",
+            messages=[_Message("user", "hello")],
+            temperature=0.2,
+            stream=True,
+            metadata={},
+            response_format=None,
+        )
+
+        resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+        events = _parse_chat_sse_data(await _collect_stream(resp))
+        payload = FakeAsyncClient.instances[-1].stream_calls[-1]["json"]
+
+        self.assertEqual(resp.media_type, "text/event-stream")
+        self.assertEqual(payload["model"], "gpt-5-mini")
+        self.assertNotIn("temperature", payload)
+        self.assertEqual(events[1]["choices"][0]["delta"], {"content": "hi"})
+        self.assertEqual(events[-1], "[DONE]")
+
+    async def test_chat_completions_stream_true_local_model_uses_synthetic_sse(self):
+        calls = []
+
+        async def fake_local_chat(prompt, route_hint=None, temperature=None, meta=None, **kwargs):
+            calls.append({"prompt": prompt, "route_hint": route_hint, "kwargs": kwargs})
+            return "local ok"
+
+        self.adapter._local_chat = fake_local_chat
+        req = types.SimpleNamespace(
+            model="local-test-model",
+            messages=[_Message("user", "local hello")],
+            temperature=None,
+            stream=True,
+            metadata={},
+            response_format=None,
+        )
+
+        resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+        events = _parse_chat_sse_data(await _collect_stream(resp))
+
+        self.assertEqual(resp.media_type, "text/event-stream")
+        self.assertEqual(calls[-1]["route_hint"], "local-test-model")
+        self.assertEqual(events[0]["choices"][0]["delta"], {"role": "assistant"})
+        self.assertEqual(events[1]["choices"][0]["delta"], {"content": "local ok"})
+        self.assertEqual(events[-2]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(events[-1], "[DONE]")
+
+    async def test_chat_completions_stream_false_local_model_stays_classic_chat_completion(self):
+        async def fake_local_chat(prompt, route_hint=None, temperature=None, meta=None, **kwargs):
+            return "local ok"
+
+        self.adapter._local_chat = fake_local_chat
+        req = types.SimpleNamespace(
+            model="local-test-model",
+            messages=[_Message("user", "local hello")],
+            temperature=None,
+            stream=False,
+            metadata={},
+            response_format=None,
+        )
+
+        resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+
+        self.assertEqual(resp.object, "chat.completion")
+        self.assertEqual(resp.choices[0].message, {"role": "assistant", "content": "local ok"})
+
+    async def test_chat_completions_non_stream_response_format_json_schema_still_forwarded(self):
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer_schema",
+                "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+            },
+        }
+        self.adapter._REMOTE_CONF["models"]["gpt-4o-mini"] = {
+            "base_url": "https://api.openai.com/v1",
+            "api_key_env": "PLAIN_API_KEY",
+            "use_responses_api": False,
+            "force_chat": True,
+        }
+        req = types.SimpleNamespace(
+            model="gpt-4o-mini",
+            messages=[_Message("user", "json please")],
+            temperature=None,
+            stream=False,
+            metadata={},
+            response_format=response_format,
+        )
+
+        resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+        payload = FakeAsyncClient.instances[-1].calls[-1]["json"]
+
+        self.assertEqual(resp.object, "chat.completion")
+        self.assertEqual(payload["response_format"]["type"], "json_schema")
+        self.assertEqual(payload["response_format"]["json_schema"]["name"], "answer_schema")
 
     async def test_deepseek_native_responses_uses_responses_endpoint_and_provider_model(self):
         self.adapter._REMOTE_CONF["models"]["deepseek/deepseek-v4-flash"].update({
