@@ -1,0 +1,552 @@
+"use strict";exports.id=641,exports.ids=[641],exports.modules={1850:(a,b,c)=>{c.d(b,{A:()=>j});var d=c(46901),e=c(56471);let f=d.Ay$.object({type:d.Ay$.literal("web_search"),queries:d.Ay$.array(d.Ay$.string()).describe("An array of search queries to perform web searches for.")}),g=`
+Use this tool to perform web searches based on the provided queries. This is useful when you need to gather information from the web to answer the user's questions. You can provide up to 3 queries at a time. You will have to use this every single time if this is present and relevant.
+You are currently on speed mode, meaning you would only get to call this tool once. Make sure to prioritize the most important queries that are likely to get you the needed information in one go.
+
+Your queries should be very targeted and specific to the information you need, avoid broad or generic queries.
+Your queries shouldn't be sentences but rather keywords that are SEO friendly and can be used to search the web for information.
+
+For example, if the user is asking about the features of a new technology, you might use queries like "GPT-5.1 features", "GPT-5.1 release date", "GPT-5.1 improvements" rather than a broad query like "Tell me about GPT-5.1".
+
+You can search for 3 queries in one go, make sure to utilize all 3 queries to maximize the information you can gather. If a question is simple, then split your queries to cover different aspects or related topics to get a comprehensive understanding.
+If this tool is present and no other tools are more relevant, you MUST use this tool to get the needed information.
+`,h=`
+Use this tool to perform web searches based on the provided queries. This is useful when you need to gather information from the web to answer the user's questions. You can provide up to 3 queries at a time. You will have to use this every single time if this is present and relevant.
+
+You can call this tool several times if needed to gather enough information.
+Start initially with broader queries to get an overview, then narrow down with more specific queries based on the results you receive.
+
+Your queries shouldn't be sentences but rather keywords that are SEO friendly and can be used to search the web for information.
+
+For example if the user is asking about Tesla, your actions should be like:
+1. __reasoning_preamble "The user is asking about Tesla. I will start with broader queries to get an overview of Tesla, then narrow down with more specific queries based on the results I receive." then
+2. web_search ["Tesla", "Tesla latest news", "Tesla stock price"] then
+3. __reasoning_preamble "Based on the previous search results, I will now narrow down my queries to focus on Tesla's recent developments and stock performance." then
+4. web_search ["Tesla Q2 2025 earnings", "Tesla new model 2025", "Tesla stock analysis"] then done.
+5. __reasoning_preamble "I have gathered enough information to provide a comprehensive answer."
+6. done.
+
+You can search for 3 queries in one go, make sure to utilize all 3 queries to maximize the information you can gather. If a question is simple, then split your queries to cover different aspects or related topics to get a comprehensive understanding.
+If this tool is present and no other tools are more relevant, you MUST use this tool to get the needed information. You can call this tools, multiple times as needed.
+`,i=`
+Use this tool to perform web searches based on the provided queries. This is useful when you need to gather information from the web to answer the user's questions. You can provide up to 3 queries at a time. You will have to use this every single time if this is present and relevant.
+
+You have to call this tool several times to gather enough information unless the question is very simple (like greeting questions or basic facts).
+Start initially with broader queries to get an overview, then narrow down with more specific queries based on the results you receive.
+Never stop before at least 5-6 iterations of searches unless the user question is very simple.
+
+Your queries shouldn't be sentences but rather keywords that are SEO friendly and can be used to search the web for information.
+
+You can search for 3 queries in one go, make sure to utilize all 3 queries to maximize the information you can gather. If a question is simple, then split your queries to cover different aspects or related topics to get a comprehensive understanding.
+If this tool is present and no other tools are more relevant, you MUST use this tool to get the needed information. You can call this tools, multiple times as needed.
+`,j={name:"web_search",schema:f,getToolDescription:()=>"Use this tool to perform web searches based on the provided queries. This is useful when you need to gather information from the web to answer the user's questions. You can provide up to 3 queries at a time. You will have to use this every single time if this is present and relevant.",getDescription:a=>{let b="";switch(a.mode){case"speed":default:b=g;break;case"balanced":b=h;break;case"quality":b=i}return b},enabled:a=>a.sources.includes("web")&&!1===a.classification.classification.skipSearch,execute:async(a,b)=>{a.queries=a.queries.slice(0,3);let c=b.session.getBlock(b.researchBlockId);c&&"research"===c.type&&(c.data.subSteps.push({id:crypto.randomUUID(),type:"searching",searching:a.queries}),b.session.updateBlock(b.researchBlockId,[{op:"replace",path:"/data/subSteps",value:c.data.subSteps}]));let d=crypto.randomUUID(),f=!1,g=[],h=async a=>{let h=(await (0,e.n)(a)).results.map(a=>({content:a.content||a.title,metadata:{title:a.title,url:a.url}}));if(g.push(...h),!f&&c&&"research"===c.type)f=!0,c.data.subSteps.push({id:d,type:"search_results",reading:h}),b.session.updateBlock(b.researchBlockId,[{op:"replace",path:"/data/subSteps",value:c.data.subSteps}]);else if(f&&c&&"research"===c.type){let a=c.data.subSteps.findIndex(a=>a.id===d);c.data.subSteps[a].reading.push(...h),b.session.updateBlock(b.researchBlockId,[{op:"replace",path:"/data/subSteps",value:c.data.subSteps}])}};return await Promise.all(a.queries.map(h)),{type:"search_results",results:g}}}},15332:(a,b,c)=>{c.d(b,{u:()=>j});var d=c(46901),e=c(80202),f=c(83617);let g=d.Ay$.object({expression:d.Ay$.string().describe("Mathematical expression to calculate or evaluate."),notPresent:d.Ay$.boolean().describe("Whether there is any need for the calculation widget.")}),h=`
+<role>
+Assistant is a calculation expression extractor. You will recieve a user follow up and a conversation history.
+Your task is to determine if there is a mathematical expression that needs to be calculated or evaluated. If there is, extract the expression and return it. If there is no need for any calculation, set notPresent to true.
+</role>
+
+<instructions>
+Make sure that the extracted expression is valid and can be used to calculate the result with Math JS library (https://mathjs.org/). If the expression is not valid, set notPresent to true.
+If you feel like you cannot extract a valid expression, set notPresent to true.
+</instructions>
+
+<output_format>
+You must respond in the following JSON format without any extra text, explanations or filler sentences:
+{
+  "expression": string,
+  "notPresent": boolean
+}
+</output_format>
+`;class i{static{this.widgets=new Map}static register(a){this.widgets.set(a.type,a)}static getWidget(a){return this.widgets.get(a)}static async executeAll(a){let b=[];return await Promise.all(Array.from(this.widgets.values()).map(async c=>{try{if(c.shouldExecute(a.classification)){let d=await c.execute(a);d&&b.push(d)}}catch(a){console.log(`Error executing widget ${c.type}:`,a)}})),b}}let j=i,k=d.Ay$.object({location:d.Ay$.string().describe('Human-readable location name (e.g., "New York, NY, USA", "London, UK"). Use this OR lat/lon coordinates, never both. Leave empty string if providing coordinates.'),lat:d.Ay$.number().describe("Latitude coordinate in decimal degrees (e.g., 40.7128). Only use when location name is empty."),lon:d.Ay$.number().describe("Longitude coordinate in decimal degrees (e.g., -74.0060). Only use when location name is empty."),notPresent:d.Ay$.boolean().describe("Whether there is no need for the weather widget.")}),l=`
+<role>
+You are a location extractor for weather queries. You will receive a user follow up and a conversation history.
+Your task is to determine if the user is asking about weather and extract the location they want weather for.
+</role>
+
+<instructions>
+- If the user is asking about weather, extract the location name OR coordinates (never both).
+- If using location name, set lat and lon to 0.
+- If using coordinates, set location to empty string.
+- If you cannot determine a valid location or the query is not weather-related, set notPresent to true.
+- Location should be specific (city, state/region, country) for best results.
+- You have to give the location so that it can be used to fetch weather data, it cannot be left empty unless notPresent is true.
+- Make sure to infer short forms of location names (e.g., "NYC" -> "New York City", "LA" -> "Los Angeles").
+</instructions>
+
+<output_format>
+You must respond in the following JSON format without any extra text, explanations or filler sentences:
+{
+  "location": string,
+  "lat": number,
+  "lon": number,
+  "notPresent": boolean
+}
+</output_format>
+`,m=new(c(59144)).A({suppressNotices:["yahooSurvey"]}),n=d.Ay$.object({name:d.Ay$.string().describe("The stock name for example Nvidia, Google, Apple, Microsoft etc. You can also return ticker if you're aware of it otherwise just use the name."),comparisonNames:d.Ay$.array(d.Ay$.string()).max(3).describe("Optional array of up to 3 stock names to compare against the base name (e.g., ['Microsoft', 'GOOGL', 'Meta']). Charts will show percentage change comparison."),notPresent:d.Ay$.boolean().describe("Whether there is no need for the stock widget.")}),o=`
+<role>
+You are a stock ticker/name extractor. You will receive a user follow up and a conversation history.
+Your task is to determine if the user is asking about stock information and extract the stock name(s) they want data for.
+</role>
+
+<instructions>
+- If the user is asking about a stock, extract the primary stock name or ticker.
+- If the user wants to compare stocks, extract up to 3 comparison stock names in comparisonNames.
+- You can use either stock names (e.g., "Nvidia", "Apple") or tickers (e.g., "NVDA", "AAPL").
+- If you cannot determine a valid stock or the query is not stock-related, set notPresent to true.
+- If no comparison is needed, set comparisonNames to an empty array.
+</instructions>
+
+<output_format>
+You must respond in the following JSON format without any extra text, explanations or filler sentences:
+{
+  "name": string,
+  "comparisonNames": string[],
+  "notPresent": boolean
+}
+</output_format>
+`;j.register({type:"weatherWidget",shouldExecute:a=>a.classification.showWeatherWidget,execute:async a=>{let b=await a.llm.generateObject({messages:[{role:"system",content:l},{role:"user",content:`<conversation_history>
+${(0,e.A)(a.chatHistory)}
+</conversation_history>
+<user_follow_up>
+${a.followUp}
+</user_follow_up>`}],schema:k});if(!b.notPresent)try{if(""===b.location&&(void 0===b.lat||void 0===b.lon))throw Error("Either location name or both latitude and longitude must be provided.");if(""!==b.location){let a=`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(b.location)}&format=json&limit=1`,c=await fetch(a,{headers:{"User-Agent":"Perplexica","Content-Type":"application/json"}}),d=(await c.json())[0];if(!d)throw Error(`Could not find coordinates for location: ${b.location}`);let e=await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${d.lat}&longitude=${d.lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,rain,showers,snowfall,weather_code,cloud_cover,pressure_msl,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly=temperature_2m,precipitation_probability,precipitation,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max&timezone=auto&forecast_days=7`,{headers:{"User-Agent":"Perplexica","Content-Type":"application/json"}}),f=await e.json();return{type:"weather",llmContext:`Weather in ${b.location} is ${JSON.stringify(f.current)}`,data:{location:b.location,latitude:d.lat,longitude:d.lon,current:f.current,hourly:{time:f.hourly.time.slice(0,24),temperature_2m:f.hourly.temperature_2m.slice(0,24),precipitation_probability:f.hourly.precipitation_probability.slice(0,24),precipitation:f.hourly.precipitation.slice(0,24),weather_code:f.hourly.weather_code.slice(0,24)},daily:f.daily,timezone:f.timezone}}}if(void 0!==b.lat&&void 0!==b.lon){let[a,c]=await Promise.all([fetch(`https://api.open-meteo.com/v1/forecast?latitude=${b.lat}&longitude=${b.lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,rain,showers,snowfall,weather_code,cloud_cover,pressure_msl,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly=temperature_2m,precipitation_probability,precipitation,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max&timezone=auto&forecast_days=7`,{headers:{"User-Agent":"Perplexica","Content-Type":"application/json"}}),fetch(`https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json`,{headers:{"User-Agent":"Perplexica","Content-Type":"application/json"}})]),d=await a.json(),e=await c.json();return{type:"weather",llmContext:`Weather in ${e.display_name} is ${JSON.stringify(d.current)}`,data:{location:e.display_name,latitude:b.lat,longitude:b.lon,current:d.current,hourly:{time:d.hourly.time.slice(0,24),temperature_2m:d.hourly.temperature_2m.slice(0,24),precipitation_probability:d.hourly.precipitation_probability.slice(0,24),precipitation:d.hourly.precipitation.slice(0,24),weather_code:d.hourly.weather_code.slice(0,24)},daily:d.daily,timezone:d.timezone}}}return{type:"weather",llmContext:"No valid location or coordinates provided.",data:null}}catch(a){return{type:"weather",llmContext:"Failed to fetch weather data.",data:{error:`Error fetching weather data: ${a}`}}}}}),j.register({type:"calculationWidget",shouldExecute:a=>a.classification.showCalculationWidget,execute:async a=>{let b=await a.llm.generateObject({messages:[{role:"system",content:h},{role:"user",content:`<conversation_history>
+${(0,e.A)(a.chatHistory)}
+</conversation_history>
+<user_follow_up>
+${a.followUp}
+</user_follow_up>`}],schema:g});if(b.notPresent)return;let c=(0,f._3)(b.expression);return{type:"calculation_result",llmContext:`The result of the calculation for the expression "${b.expression}" is: ${c}`,data:{expression:b.expression,result:c}}}}),j.register({type:"stockWidget",shouldExecute:a=>a.classification.showStockWidget,execute:async a=>{let b=await a.llm.generateObject({messages:[{role:"system",content:o},{role:"user",content:`<conversation_history>
+${(0,e.A)(a.chatHistory)}
+</conversation_history>
+<user_follow_up>
+${a.followUp}
+</user_follow_up>`}],schema:n});if(!b.notPresent)try{let a=b.name,c=await m.search(a);if(0===c.quotes.length)throw Error(`Failed to find quote for name/symbol: ${a}`);let d=c.quotes[0].symbol,e=await m.quote(d),f={"1D":m.chart(d,{period1:new Date(Date.now()-1728e5),period2:new Date,interval:"5m"}).catch(()=>null),"5D":m.chart(d,{period1:new Date(Date.now()-5184e5),period2:new Date,interval:"15m"}).catch(()=>null),"1M":m.chart(d,{period1:new Date(Date.now()-2592e6),interval:"1d"}).catch(()=>null),"3M":m.chart(d,{period1:new Date(Date.now()-7776e6),interval:"1d"}).catch(()=>null),"6M":m.chart(d,{period1:new Date(Date.now()-15552e6),interval:"1d"}).catch(()=>null),"1Y":m.chart(d,{period1:new Date(Date.now()-31536e6),interval:"1d"}).catch(()=>null),MAX:m.chart(d,{period1:new Date(Date.now()-31536e7),interval:"1wk"}).catch(()=>null)},[g,h,i,j,k,l,n]=await Promise.all([f["1D"],f["5D"],f["1M"],f["3M"],f["6M"],f["1Y"],f.MAX]);if(!e)throw Error(`No data found for ticker: ${d}`);let o=null;if(b.comparisonNames.length>0){let a=b.comparisonNames.slice(0,3).map(async a=>{try{let b=await m.search(a);if(0===b.quotes.length)return null;let c=b.quotes[0].symbol,d=await m.quote(c),e=await Promise.all([m.chart(c,{period1:new Date(Date.now()-1728e5),period2:new Date,interval:"5m"}).catch(()=>null),m.chart(c,{period1:new Date(Date.now()-5184e5),period2:new Date,interval:"15m"}).catch(()=>null),m.chart(c,{period1:new Date(Date.now()-2592e6),interval:"1d"}).catch(()=>null),m.chart(c,{period1:new Date(Date.now()-7776e6),interval:"1d"}).catch(()=>null),m.chart(c,{period1:new Date(Date.now()-15552e6),interval:"1d"}).catch(()=>null),m.chart(c,{period1:new Date(Date.now()-31536e6),interval:"1d"}).catch(()=>null),m.chart(c,{period1:new Date(Date.now()-31536e7),interval:"1wk"}).catch(()=>null)]);return{ticker:c,name:d.shortName||c,charts:e}}catch(b){return console.error(`Failed to fetch comparison ticker ${a}:`,b),null}});o=(await Promise.all(a)).filter(a=>null!==a)}let p={symbol:e.symbol,shortName:e.shortName||e.longName||d,longName:e.longName,exchange:e.fullExchangeName||e.exchange,currency:e.currency,quoteType:e.quoteType,marketState:e.marketState,regularMarketTime:e.regularMarketTime,postMarketTime:e.postMarketTime,preMarketTime:e.preMarketTime,regularMarketPrice:e.regularMarketPrice,regularMarketChange:e.regularMarketChange,regularMarketChangePercent:e.regularMarketChangePercent,regularMarketPreviousClose:e.regularMarketPreviousClose,regularMarketOpen:e.regularMarketOpen,regularMarketDayHigh:e.regularMarketDayHigh,regularMarketDayLow:e.regularMarketDayLow,postMarketPrice:e.postMarketPrice,postMarketChange:e.postMarketChange,postMarketChangePercent:e.postMarketChangePercent,preMarketPrice:e.preMarketPrice,preMarketChange:e.preMarketChange,preMarketChangePercent:e.preMarketChangePercent,regularMarketVolume:e.regularMarketVolume,averageDailyVolume3Month:e.averageDailyVolume3Month,averageDailyVolume10Day:e.averageDailyVolume10Day,bid:e.bid,bidSize:e.bidSize,ask:e.ask,askSize:e.askSize,fiftyTwoWeekLow:e.fiftyTwoWeekLow,fiftyTwoWeekHigh:e.fiftyTwoWeekHigh,fiftyTwoWeekChange:e.fiftyTwoWeekChange,fiftyTwoWeekChangePercent:e.fiftyTwoWeekChangePercent,marketCap:e.marketCap,trailingPE:e.trailingPE,forwardPE:e.forwardPE,priceToBook:e.priceToBook,bookValue:e.bookValue,earningsPerShare:e.epsTrailingTwelveMonths,epsForward:e.epsForward,dividendRate:e.dividendRate,dividendYield:e.dividendYield,exDividendDate:e.exDividendDate,trailingAnnualDividendRate:e.trailingAnnualDividendRate,trailingAnnualDividendYield:e.trailingAnnualDividendYield,beta:e.beta,fiftyDayAverage:e.fiftyDayAverage,fiftyDayAverageChange:e.fiftyDayAverageChange,fiftyDayAverageChangePercent:e.fiftyDayAverageChangePercent,twoHundredDayAverage:e.twoHundredDayAverage,twoHundredDayAverageChange:e.twoHundredDayAverageChange,twoHundredDayAverageChangePercent:e.twoHundredDayAverageChangePercent,sector:e.sector,industry:e.industry,website:e.website,chartData:{"1D":g?{timestamps:g.quotes.map(a=>a.date.getTime()),prices:g.quotes.map(a=>a.close)}:null,"5D":h?{timestamps:h.quotes.map(a=>a.date.getTime()),prices:h.quotes.map(a=>a.close)}:null,"1M":i?{timestamps:i.quotes.map(a=>a.date.getTime()),prices:i.quotes.map(a=>a.close)}:null,"3M":j?{timestamps:j.quotes.map(a=>a.date.getTime()),prices:j.quotes.map(a=>a.close)}:null,"6M":k?{timestamps:k.quotes.map(a=>a.date.getTime()),prices:k.quotes.map(a=>a.close)}:null,"1Y":l?{timestamps:l.quotes.map(a=>a.date.getTime()),prices:l.quotes.map(a=>a.close)}:null,MAX:n?{timestamps:n.quotes.map(a=>a.date.getTime()),prices:n.quotes.map(a=>a.close)}:null},comparisonData:o?o.map(a=>({ticker:a.ticker,name:a.name,chartData:{"1D":a.charts[0]?{timestamps:a.charts[0].quotes.map(a=>a.date.getTime()),prices:a.charts[0].quotes.map(a=>a.close)}:null,"5D":a.charts[1]?{timestamps:a.charts[1].quotes.map(a=>a.date.getTime()),prices:a.charts[1].quotes.map(a=>a.close)}:null,"1M":a.charts[2]?{timestamps:a.charts[2].quotes.map(a=>a.date.getTime()),prices:a.charts[2].quotes.map(a=>a.close)}:null,"3M":a.charts[3]?{timestamps:a.charts[3].quotes.map(a=>a.date.getTime()),prices:a.charts[3].quotes.map(a=>a.close)}:null,"6M":a.charts[4]?{timestamps:a.charts[4].quotes.map(a=>a.date.getTime()),prices:a.charts[4].quotes.map(a=>a.close)}:null,"1Y":a.charts[5]?{timestamps:a.charts[5].quotes.map(a=>a.date.getTime()),prices:a.charts[5].quotes.map(a=>a.close)}:null,MAX:a.charts[6]?{timestamps:a.charts[6].quotes.map(a=>a.date.getTime()),prices:a.charts[6].quotes.map(a=>a.close)}:null}})):null};return{type:"stock",llmContext:`Current price of ${p.shortName} (${p.symbol}) is ${p.regularMarketPrice} ${p.currency}. Other details: ${JSON.stringify({marketState:p.marketState,regularMarketChange:p.regularMarketChange,regularMarketChangePercent:p.regularMarketChangePercent,marketCap:p.marketCap,peRatio:p.trailingPE,dividendYield:p.dividendYield})}`,data:p}}catch(a){return{type:"stock",llmContext:"Failed to fetch stock data.",data:{error:`Error fetching stock data: ${a.message||a}`,ticker:b.name}}}}})},16505:(a,b,c)=>{c.d(b,{A:()=>i});var d=c(12171),e=c(91922),f=c(1774),g=c(91880);class h{constructor(){this.activeProviders=[],this.initializeActiveProviders()}initializeActiveProviders(){(0,e.OF)().forEach(a=>{try{let b=f.r[a.type];if(!b)throw Error("Invalid provider type");this.activeProviders.push({...a,provider:(0,d.j)(b,a.id,a.name,a.config)})}catch(b){console.error(`Failed to initialize provider. Type: ${a.type}, ID: ${a.id}, Config: ${JSON.stringify(a.config)}, Error: ${b}`)}})}async getActiveProviders(){let a=[];return await Promise.all(this.activeProviders.map(async b=>{let c={chat:[],embedding:[]};try{c=await b.provider.getModelList()}catch(a){console.error(`Failed to get model list. Type: ${b.type}, ID: ${b.id}, Error: ${a.message}`),c={chat:[{key:"error",name:a.message}],embedding:[]}}a.push({id:b.id,name:b.name,chatModels:c.chat,embeddingModels:c.embedding})})),a}async loadChatModel(a,b){let c=this.activeProviders.find(b=>b.id===a);if(!c)throw Error("Invalid provider id");return await c.provider.loadChatModel(b)}async loadEmbeddingModel(a,b){let c=this.activeProviders.find(b=>b.id===a);if(!c)throw Error("Invalid provider id");return await c.provider.loadEmbeddingModel(b)}async addProvider(a,b,c){let e=f.r[a];if(!e)throw Error("Invalid provider type");let h=g.A.addModelProvider(a,b,c),i=(0,d.j)(e,h.id,h.name,h.config),j={chat:[],embedding:[]};try{j=await i.getModelList()}catch(b){console.error(`Failed to get model list for newly added provider. Type: ${a}, ID: ${h.id}, Error: ${b.message}`),j={chat:[{key:"error",name:b.message}],embedding:[]}}return this.activeProviders.push({...h,provider:i}),{...h,chatModels:j.chat||[],embeddingModels:j.embedding||[]}}async removeProvider(a){g.A.removeModelProvider(a),this.activeProviders=this.activeProviders.filter(b=>b.id!==a)}async updateProvider(a,b,c){let e=await g.A.updateModelProvider(a,b,c),h=(0,d.j)(f.r[e.type],a,b,c),i={chat:[],embedding:[]};try{i=await h.getModelList()}catch(a){console.error(`Failed to get model list for updated provider. Type: ${e.type}, ID: ${e.id}, Error: ${a.message}`),i={chat:[{key:"error",name:a.message}],embedding:[]}}return this.activeProviders.push({...e,provider:h}),{...e,chatModels:i.chat||[],embeddingModels:i.embedding||[]}}async addProviderModel(a,b,c){return g.A.addProviderModel(a,b,c)}async removeProviderModel(a,b,c){g.A.removeProviderModel(a,b,c)}}let i=h},18361:(a,b,c)=>{c.d(b,{A:()=>e});class d{static{this.actions=new Map}static register(a){this.actions.set(a.name,a)}static get(a){return this.actions.get(a)}static getAvailableActions(a){return Array.from(this.actions.values().filter(b=>b.enabled(a)))}static getAvailableActionTools(a){return this.getAvailableActions(a).map(b=>({name:b.name,description:b.getToolDescription({mode:a.mode}),schema:b.schema}))}static getAvailableActionsDescriptions(a){return this.getAvailableActions(a).map(b=>`<tool name="${b.name}">
+${b.getDescription({mode:a.mode})}
+</tool>`).join("\n\n")}static async execute(a,b,c){let d=this.actions.get(a);if(!d)throw Error(`Action with name ${a} not found`);return d.execute(b,c)}static async executeAll(a,b){let c=[];return await Promise.all(a.map(async a=>{let d=await this.execute(a.name,a.arguments,b);c.push(d)})),c}}let e=d},19644:(a,b,c)=>{c.a(a,async(a,d)=>{try{c.d(b,{s:()=>h.A});var e=c(67249),f=c(92654),g=c(46201),h=c(18361),i=c(91421),j=c(57917),k=c(43422),l=c(1850),m=a([k]);k=(m.then?(await m)():m)[0],h.A.register(l.A),h.A.register(f.A),h.A.register(g.A),h.A.register(i.A),h.A.register(k.A),h.A.register(e.A),h.A.register(j.A),d()}catch(a){d(a)}})},22311:(a,b,c)=>{c.a(a,async(a,d)=>{try{c.d(b,{A:()=>r});var e=c(33873),f=c.n(e),g=c(55511),h=c.n(g),i=c(29021),j=c.n(i),k=c(29092),l=c(80526),m=c(90073),n=c(43254),o=a([l,m]);[l,m]=o.then?(await o)():o;let p=["application/pdf","application/vnd.openxmlformats-officedocument.wordprocessingml.document","text/plain"];class q{static{this.uploadsDir=f().join(process.cwd(),"data","uploads")}static{this.uploadedFilesRecordPath=f().join(this.uploadsDir,"uploaded_files.json")}constructor(a){this.params=a,this.embeddingModel=a.embeddingModel,j().existsSync(q.uploadsDir)||j().mkdirSync(q.uploadsDir,{recursive:!0}),j().existsSync(q.uploadedFilesRecordPath)||j().writeFileSync(q.uploadedFilesRecordPath,JSON.stringify({files:[]},null,2))}static getRecordedFiles(){let a=j().readFileSync(q.uploadedFilesRecordPath,"utf-8");return JSON.parse(a).files}static addNewRecordedFile(a){let b=this.getRecordedFiles();b.push(a),j().writeFileSync(q.uploadedFilesRecordPath,JSON.stringify({files:b},null,2))}static getFile(a){return this.getRecordedFiles().find(b=>b.id===a)||null}static getFileChunks(a){try{let b=this.getFile(a);if(!b)throw Error(`File with ID ${a} not found`);return JSON.parse(j().readFileSync(b.contentPath,"utf-8")).chunks}catch(a){return console.log("Error getting file chunks:",a),[]}}async extractContentAndEmbed(a,b){switch(b){case"text/plain":let c=j().readFileSync(a,"utf-8"),d=(0,k.A)(c,512,128),e=await this.embeddingModel.embedText(d);if(e.length!==d.length)throw Error("Embeddings and text chunks length mismatch");let f=a.split(".").slice(0,-1).join(".")+".content.json",g={chunks:d.map((a,b)=>({content:a,embedding:e[b]}))};return j().writeFileSync(f,JSON.stringify(g,null,2)),f;case"application/pdf":let h=j().readFileSync(a),i=new l.PDFParse({data:h,CanvasFactory:m.CanvasFactory}),o=await i.getText().then(a=>a.text),p=(0,k.A)(o,512,128),q=await this.embeddingModel.embedText(p);if(q.length!==p.length)throw Error("Embeddings and text chunks length mismatch");let r=a.split(".").slice(0,-1).join(".")+".content.json",s={chunks:p.map((a,b)=>({content:a,embedding:q[b]}))};return j().writeFileSync(r,JSON.stringify(s,null,2)),r;case"application/vnd.openxmlformats-officedocument.wordprocessingml.document":let t=j().readFileSync(a),u=await n.parseOfficeAsync(t),v=(0,k.A)(u,512,128),w=await this.embeddingModel.embedText(v);if(w.length!==v.length)throw Error("Embeddings and text chunks length mismatch");let x=a.split(".").slice(0,-1).join(".")+".content.json",y={chunks:v.map((a,b)=>({content:a,embedding:w[b]}))};return j().writeFileSync(x,JSON.stringify(y,null,2)),x;default:throw Error(`Unsupported file type: ${b}`)}}async processFiles(a){let b=[];return await Promise.all(a.map(async a=>{if(!p.includes(a.type))throw Error(`File type ${a.type} not supported`);let c=h().randomBytes(16).toString("hex"),d=a.name.split(".").pop(),e=`${h().randomBytes(16).toString("hex")}.${d}`,g=f().join(q.uploadsDir,e),i=Buffer.from(await a.arrayBuffer());j().writeFileSync(g,i);let k=await this.extractContentAndEmbed(g,a.type),l={id:c,name:a.name,filePath:g,contentPath:k,uploadedAt:new Date().toISOString()};q.addNewRecordedFile(l),b.push({fileExtension:d||"",fileId:c,fileName:a.name})})),b}}let r=q;d()}catch(a){d(a)}})},25341:(a,b,c)=>{c.d(b,{A:()=>d});let d=(a,b)=>{if(a.length!==b.length)throw Error("Vectors must be of the same length");let c=0,d=0,e=0;for(let f=0;f<a.length;f++)c+=a[f]*b[f],d+=a[f]*a[f],e+=b[f]*b[f];return 0===d||0===e?0:c/(Math.sqrt(d)*Math.sqrt(e))}},29092:(a,b,c)=>{c.d(b,{A:()=>h});var d=c(98512);let e=/(?<=\. |\n|! |\? |; |:\s|\d+\.\s|- |\* )/g,f=(0,d._1)("cl100k_base"),g=a=>{try{return f.encode(a).length}catch{return Math.ceil(a.length/4)}},h=(a,b=512,c=64)=>{let d=a.split(e).filter(Boolean);if(0===d.length)return[];let f=d.map(g),h=[],i=0;for(;i<d.length;){let a=i,e=0;for(;a<d.length&&e<b&&!(e+f[a]>b);)e+=f[a],a++;let g=Math.max(0,i-1),j=0;for(;g>=0&&j<c&&!(j+f[g]>c);)j+=f[g],g--;let k=Math.max(0,g+1),l=d.slice(k,i).join(""),m=d.slice(i,a).join("");h.push(l+m),i=a}return h}},35909:(a,b,c)=>{c.d(b,{A:()=>h});var d=c(27910),e=c(45708);let f=global._sessionManagerSessions||new Map;class g{static{this.sessions=f}constructor(a){this.blocks=new Map,this.events=[],this.emitter=new d.EventEmitter,this.TTL_MS=18e5,this.id=a??crypto.randomUUID(),setTimeout(()=>{g.sessions.delete(this.id)},this.TTL_MS)}static getSession(a){return this.sessions.get(a)}static getAllSessions(){return Array.from(this.sessions.values())}static createSession(){let a=new g;return this.sessions.set(a.id,a),a}removeAllListeners(){this.emitter.removeAllListeners()}emit(a,b){this.emitter.emit(a,b),this.events.push({event:a,data:b})}emitBlock(a){this.blocks.set(a.id,a),this.emit("data",{type:"block",block:a})}getBlock(a){return this.blocks.get(a)}updateBlock(a,b){let c=this.blocks.get(a);c&&((0,e.X6)(c,b),this.blocks.set(a,c),this.emit("data",{type:"updateBlock",blockId:a,patch:b}))}getAllBlocks(){return Array.from(this.blocks.values())}subscribe(a){let b=this.events.length,c=b=>c=>a(b,c),d=c("data"),e=c("end"),f=c("error");this.emitter.on("data",d),this.emitter.on("end",e),this.emitter.on("error",f);for(let c=0;c<b;c++){let{event:b,data:d}=this.events[c];a(b,d)}return()=>{this.emitter.off("data",d),this.emitter.off("end",e),this.emitter.off("error",f)}}}let h=g},43090:(a,b,c)=>{c.a(a,async(a,d)=>{try{c.d(b,{b:()=>g});var e=c(72429),f=a([e]);e=(f.then?(await f)():f)[0];let g=(a,b,c,d,f)=>{let g="",h=e.A.getFileData(f).map(a=>`<file><name>${a.fileName}</name><initial_content>${a.initialContent}</initial_content></file>`).join("\n");switch(b){case"speed":default:var i,j,k,l;let m;i=a,j=c,k=d,l=h,m=new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"}),g=`
+  Assistant is an action orchestrator. Your job is to fulfill user requests by selecting and executing the available tools—no free-form replies.
+  You will be shared with the conversation history between user and an AI, along with the user's latest follow-up question. Based on this, you must use the available tools to fulfill the user's request.
+
+  Today's date: ${m}
+
+  You are currently on iteration ${j+1} of your research process and have ${k} total iterations so act efficiently.
+  When you are finished, you must call the \`done\` tool. Never output text directly.
+
+  <goal>
+  Fulfill the user's request as quickly as possible using the available tools.
+  Call tools to gather information or perform tasks as needed.
+  </goal>
+
+  <core_principle>
+  Your knowledge is outdated; if you have web search, use it to ground answers even for seemingly basic facts.
+  </core_principle>
+
+  <examples>
+
+  ## Example 1: Unknown Subject
+  User: "What is Kimi K2?"
+  Action: web_search ["Kimi K2", "Kimi K2 AI"] then done.
+
+  ## Example 2: Subject You're Uncertain About
+  User: "What are the features of GPT-5.1?"
+  Action: web_search ["GPT-5.1", "GPT-5.1 features", "GPT-5.1 release"] then done.
+
+  ## Example 3: After Tool calls Return Results
+  User: "What are the features of GPT-5.1?"
+  [Previous tool calls returned the needed info]
+  Action: done.
+
+  </examples>
+
+  <available_tools>
+  ${i}
+  </available_tools>
+
+  <mistakes_to_avoid>
+
+1. **Over-assuming**: Don't assume things exist or don't exist - just look them up
+
+2. **Verification obsession**: Don't waste tool calls "verifying existence" - just search for the thing directly
+
+3. **Endless loops**: If 2-3 tool calls don't find something, it probably doesn't exist - report that and move on
+
+4. **Ignoring task context**: If user wants a calendar event, don't just search - create the event
+
+5. **Overthinking**: Keep reasoning simple and tool calls focused
+
+</mistakes_to_avoid>
+
+  <response_protocol>
+- NEVER output normal text to the user. ONLY call tools.
+- Choose the appropriate tools based on the action descriptions provided above.
+- Default to web_search when information is missing or stale; keep queries targeted (max 3 per call).
+- Call done when you have gathered enough to answer or performed the required actions.
+- Do not invent tools. Do not return JSON.
+  </response_protocol>
+
+  ${l.length>0?`<user_uploaded_files>
+  The user has uploaded the following files which may be relevant to their request:
+  ${l}
+  You can use the uploaded files search tool to look for information within these documents if needed.
+  </user_uploaded_files>`:""}
+  `;break;case"balanced":let n;n=new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"}),g=`
+  Assistant is an action orchestrator. Your job is to fulfill user requests by reasoning briefly and executing the available tools—no free-form replies.
+  You will be shared with the conversation history between user and an AI, along with the user's latest follow-up question. Based on this, you must use the available tools to fulfill the user's request.
+
+  Today's date: ${n}
+
+  You are currently on iteration ${c+1} of your research process and have ${d} total iterations so act efficiently.
+  When you are finished, you must call the \`done\` tool. Never output text directly.
+
+  <goal>
+  Fulfill the user's request with concise reasoning plus focused actions.
+  You must call the __reasoning_preamble tool before every tool call in this assistant turn. Alternate: __reasoning_preamble → tool → __reasoning_preamble → tool ... and finish with __reasoning_preamble → done. Open each __reasoning_preamble with a brief intent phrase (e.g., "Okay, the user wants to...", "Searching for...", "Looking into...") and lay out your reasoning for the next step. Keep it natural language, no tool names.
+  </goal>
+
+  <core_principle>
+  Your knowledge is outdated; if you have web search, use it to ground answers even for seemingly basic facts.
+  You can call at most 6 tools total per turn: up to 2 reasoning (__reasoning_preamble counts as reasoning), 2-3 information-gathering calls, and 1 done. If you hit the cap, stop after done.
+  Aim for at least two information-gathering calls when the answer is not already obvious; only skip the second if the question is trivial or you already have sufficient context.
+  Do not spam searches—pick the most targeted queries.
+  </core_principle>
+
+  <done_usage>
+  Call done only after the reasoning plus the necessary tool calls are completed and you have enough to answer. If you call done early, stop. If you reach the tool cap, call done to conclude.
+  </done_usage>
+
+  <examples>
+
+  ## Example 1: Unknown Subject
+  User: "What is Kimi K2?"
+  Reason: "Okay, the user wants to know about Kimi K2. I will start by looking for what Kimi K2 is and its key details, then summarize the findings."
+  Action: web_search ["Kimi K2", "Kimi K2 AI"] then reasoning then done.
+
+  ## Example 2: Subject You're Uncertain About
+  User: "What are the features of GPT-5.1?"
+  Reason: "The user is asking about GPT-5.1 features. I will search for current feature and release information, then compile a summary."
+  Action: web_search ["GPT-5.1", "GPT-5.1 features", "GPT-5.1 release"] then reasoning then done.
+
+  ## Example 3: After Tool calls Return Results
+  User: "What are the features of GPT-5.1?"
+  [Previous tool calls returned the needed info]
+  Reason: "I have gathered enough information about GPT-5.1 features; I will now wrap up."
+  Action: done.
+
+  </examples>
+
+  <available_tools>
+  YOU MUST CALL __reasoning_preamble BEFORE EVERY TOOL CALL IN THIS ASSISTANT TURN. IF YOU DO NOT CALL IT, THE TOOL CALL WILL BE IGNORED.
+  ${a}
+  </available_tools>
+
+  <mistakes_to_avoid>
+
+1. **Over-assuming**: Don't assume things exist or don't exist - just look them up
+
+2. **Verification obsession**: Don't waste tool calls "verifying existence" - just search for the thing directly
+
+3. **Endless loops**: If 2-3 tool calls don't find something, it probably doesn't exist - report that and move on
+
+4. **Ignoring task context**: If user wants a calendar event, don't just search - create the event
+
+5. **Overthinking**: Keep reasoning simple and tool calls focused
+
+6. **Skipping the reasoning step**: Always call __reasoning_preamble first to outline your approach before other actions
+
+</mistakes_to_avoid>
+
+  <response_protocol>
+- NEVER output normal text to the user. ONLY call tools.
+- Start with __reasoning_preamble and call __reasoning_preamble before every tool call (including done): open with intent phrase ("Okay, the user wants to...", "Looking into...", etc.) and lay out your reasoning for the next step. No tool names.
+- Choose tools based on the action descriptions provided above.
+- Default to web_search when information is missing or stale; keep queries targeted (max 3 per call).
+- Use at most 6 tool calls total (__reasoning_preamble + 2-3 info calls + __reasoning_preamble + done). If done is called early, stop.
+- Do not stop after a single information-gathering call unless the task is trivial or prior results already cover the answer.
+- Call done only after you have the needed info or actions completed; do not call it early.
+- Do not invent tools. Do not return JSON.
+  </response_protocol>
+
+  ${h.length>0?`<user_uploaded_files>
+  The user has uploaded the following files which may be relevant to their request:
+  ${h}
+  You can use the uploaded files search tool to look for information within these documents if needed.
+  </user_uploaded_files>`:""}
+  `;break;case"quality":let o;o=new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"}),g=`
+  Assistant is a deep-research orchestrator. Your job is to fulfill user requests with the most thorough, comprehensive research possible—no free-form replies.
+  You will be shared with the conversation history between user and an AI, along with the user's latest follow-up question. Based on this, you must use the available tools to fulfill the user's request with depth and rigor.
+
+  Today's date: ${o}
+
+  You are currently on iteration ${c+1} of your research process and have ${d} total iterations. Use every iteration wisely to gather comprehensive information.
+  When you are finished, you must call the \`done\` tool. Never output text directly.
+
+  <goal>
+  Conduct the deepest, most thorough research possible. Leave no stone unturned.
+  Follow an iterative reason-act loop: call __reasoning_preamble before every tool call to outline the next step, then call the tool, then __reasoning_preamble again to reflect and decide the next step. Repeat until you have exhaustive coverage.
+  Open each __reasoning_preamble with a brief intent phrase (e.g., "Okay, the user wants to know about...", "From the results, it looks like...", "Now I need to dig into...") and describe what you'll do next. Keep it natural language, no tool names.
+  Finish with done only when you have comprehensive, multi-angle information.
+  </goal>
+
+  <core_principle>
+  Your knowledge is outdated; always use the available tools to ground answers.
+  This is DEEP RESEARCH mode—be exhaustive. Explore multiple angles: definitions, features, comparisons, recent news, expert opinions, use cases, limitations, and alternatives.
+  You can call up to 10 tools total per turn. Use an iterative loop: __reasoning_preamble → tool call(s) → __reasoning_preamble → tool call(s) → ... → __reasoning_preamble → done.
+  Never settle for surface-level answers. If results hint at more depth, reason about your next step and follow up. Cross-reference information from multiple queries.
+  </core_principle>
+
+  <done_usage>
+  Call done only after you have gathered comprehensive, multi-angle information. Do not call done early—exhaust your research budget first. If you reach the tool cap, call done to conclude.
+  </done_usage>
+
+  <examples>
+
+  ## Example 1: Unknown Subject - Deep Dive
+  User: "What is Kimi K2?"
+  Reason: "Okay, the user wants to know about Kimi K2. I'll start by finding out what it is and its key capabilities."
+  [calls info-gathering tool]
+  Reason: "From the results, Kimi K2 is an AI model by Moonshot. Now I need to dig into how it compares to competitors and any recent news."
+  [calls info-gathering tool]
+  Reason: "Got comparison info. Let me also check for limitations or critiques to give a balanced view."
+  [calls info-gathering tool]
+  Reason: "I now have comprehensive coverage—definition, capabilities, comparisons, and critiques. Wrapping up."
+  Action: done.
+
+  ## Example 2: Feature Research - Comprehensive
+  User: "What are the features of GPT-5.1?"
+  Reason: "The user wants comprehensive GPT-5.1 feature information. I'll start with core features and specs."
+  [calls info-gathering tool]
+  Reason: "Got the basics. Now I should look into how it compares to GPT-4 and benchmark performance."
+  [calls info-gathering tool]
+  Reason: "Good comparison data. Let me also gather use cases and expert opinions for depth."
+  [calls info-gathering tool]
+  Reason: "I have exhaustive coverage across features, comparisons, benchmarks, and reviews. Done."
+  Action: done.
+
+  ## Example 3: Iterative Refinement
+  User: "Tell me about quantum computing applications in healthcare."
+  Reason: "Okay, the user wants to know about quantum computing in healthcare. I'll start with an overview of current applications."
+  [calls info-gathering tool]
+  Reason: "Results mention drug discovery and diagnostics. Let me dive deeper into drug discovery use cases."
+  [calls info-gathering tool]
+  Reason: "Now I'll explore the diagnostics angle and any recent breakthroughs."
+  [calls info-gathering tool]
+  Reason: "Comprehensive coverage achieved. Wrapping up."
+  Action: done.
+
+  </examples>
+
+  <available_tools>
+  YOU MUST CALL __reasoning_preamble BEFORE EVERY TOOL CALL IN THIS ASSISTANT TURN. IF YOU DO NOT CALL IT, THE TOOL CALL WILL BE IGNORED.
+  ${a}
+  </available_tools>
+
+  <research_strategy>
+  For any topic, consider searching:
+  1. **Core definition/overview** - What is it?
+  2. **Features/capabilities** - What can it do?
+  3. **Comparisons** - How does it compare to alternatives?
+  4. **Recent news/updates** - What's the latest?
+  5. **Reviews/opinions** - What do experts say?
+  6. **Use cases** - How is it being used?
+  7. **Limitations/critiques** - What are the downsides?
+  </research_strategy>
+
+  <mistakes_to_avoid>
+
+1. **Shallow research**: Don't stop after one or two searches—dig deeper from multiple angles
+
+2. **Over-assuming**: Don't assume things exist or don't exist - just look them up
+
+3. **Missing perspectives**: Search for both positive and critical viewpoints
+
+4. **Ignoring follow-ups**: If results hint at interesting sub-topics, explore them
+
+5. **Premature done**: Don't call done until you've exhausted reasonable research avenues
+
+6. **Skipping the reasoning step**: Always call __reasoning_preamble first to outline your research strategy
+
+</mistakes_to_avoid>
+
+  <response_protocol>
+- NEVER output normal text to the user. ONLY call tools.
+- Follow an iterative loop: __reasoning_preamble → tool call → __reasoning_preamble → tool call → ... → __reasoning_preamble → done.
+- Each __reasoning_preamble should reflect on previous results (if any) and state the next research step. No tool names in the reasoning.
+- Choose tools based on the action descriptions provided above—use whatever tools are available to accomplish the task.
+- Aim for 4-7 information-gathering calls covering different angles; cross-reference and follow up on interesting leads.
+- Call done only after comprehensive, multi-angle research is complete.
+- Do not invent tools. Do not return JSON.
+  </response_protocol>
+
+  ${h.length>0?`<user_uploaded_files>
+  The user has uploaded the following files which may be relevant to their request:
+  ${h}
+  You can use the uploaded files search tool to look for information within these documents if needed.
+  </user_uploaded_files>`:""}
+  `}return g};d()}catch(a){d(a)}})},43422:(a,b,c)=>{c.a(a,async(a,d)=>{try{c.d(b,{A:()=>i});var e=c(46901),f=c(72429),g=a([f]);f=(g.then?(await g)():g)[0];let h=e.Ay$.object({queries:e.Ay$.array(e.Ay$.string()).describe("A list of queries to search in user uploaded files. Can be a maximum of 3 queries.")}),i={name:"uploads_search",enabled:a=>a.classification.classification.personalSearch&&a.fileIds.length>0||a.fileIds.length>0,schema:h,getToolDescription:()=>"Use this tool to perform searches over the user's uploaded files. This is useful when you need to gather information from the user's documents to answer their questions. You can provide up to 3 queries at a time. You will have to use this every single time if this is present and relevant.",getDescription:()=>`
+  Use this tool to perform searches over the user's uploaded files. This is useful when you need to gather information from the user's documents to answer their questions. You can provide up to 3 queries at a time. You will have to use this every single time if this is present and relevant.
+  Always ensure that the queries you use are directly relevant to the user's request and pertain to the content of their uploaded files.
+
+  For example, if the user says "Please find information about X in my uploaded documents", you can call this tool with a query related to X to retrieve the relevant information from their files.
+  Never use this tool to search the web or for information that is not contained within the user's uploaded files.
+  `,execute:async(a,b)=>{a.queries=a.queries.slice(0,3);let c=b.session.getBlock(b.researchBlockId);c&&"research"===c.type&&(c.data.subSteps.push({id:crypto.randomUUID(),type:"upload_searching",queries:a.queries}),b.session.updateBlock(b.researchBlockId,[{op:"replace",path:"/data/subSteps",value:c.data.subSteps}]));let d=new f.A({embeddingModel:b.embedding,fileIds:b.fileIds}),e=await d.query(a.queries,10),g=new Map,h=e.map((a,b)=>{if(a.metadata.url&&!g.has(a.metadata.url))g.set(a.metadata.url,b);else if(a.metadata.url&&g.has(a.metadata.url)){let b=e[g.get(a.metadata.url)];b.content+=`
+
+${a.content}`;return}return a}).filter(a=>void 0!==a);return c&&"research"===c.type&&(c.data.subSteps.push({id:crypto.randomUUID(),type:"upload_search_results",results:h}),b.session.updateBlock(b.researchBlockId,[{op:"replace",path:"/data/subSteps",value:c.data.subSteps}])),{type:"search_results",results:h}}};d()}catch(a){d(a)}})},46201:(a,b,c)=>{c.d(b,{A:()=>g});var d=c(46901);let e=d.Ay$.object({plan:d.Ay$.string().describe('A concise natural-language plan in one short paragraph. Open with a short intent phrase (e.g., "Okay, the user wants to...", "Searching for...", "Looking into...") and lay out the steps you will take.')}),f=`
+Use this tool FIRST on every turn to state your plan in natural language before any other action. Keep it short, action-focused, and tailored to the current query.
+Make sure to not include reference to any tools or actions you might take, just the plan itself. The user isn't aware about tools, but they love to see your thought process.
+
+Here are some examples of good plans:
+<examples>
+- "Okay, the user wants to know the latest advancements in renewable energy. I will start by looking for recent articles and studies on this topic, then summarize the key points." -> "I have gathered enough information to provide a comprehensive answer."
+- "The user is asking about the health benefits of a Mediterranean diet. I will search for scientific studies and expert opinions on this diet, then compile the findings into a clear summary." -> "I have gathered information about the Mediterranean diet and its health benefits, I will now look up for any recent studies to ensure the information is current."
+</examples>
+
+YOU CAN NEVER CALL ANY OTHER TOOL BEFORE CALLING THIS ONE FIRST, IF YOU DO, THAT CALL WOULD BE IGNORED.
+`,g={name:"__reasoning_preamble",schema:e,getToolDescription:()=>"Use this FIRST on every turn to state your plan in natural language before any other action. Keep it short, action-focused, and tailored to the current query.",getDescription:()=>f,enabled:a=>"speed"!==a.mode,execute:async(a,b)=>({type:"reasoning",reasoning:a.plan})}},55617:(a,b,c)=>{c.d(b,{L:()=>h});var d=c(46901);let e=`
+<role>
+Assistant is an advanced AI system designed to analyze the user query and the conversation history to determine the most appropriate classification for the search operation.
+It will be shared a detailed conversation history and a user query and it has to classify the query based on the guidelines and label definitions provided. You also have to generate a standalone follow-up question that is self-contained and context-independent.
+</role>
+
+<labels>
+NOTE: BY GENERAL KNOWLEDGE WE MEAN INFORMATION THAT IS OBVIOUS, WIDELY KNOWN, OR CAN BE INFERRED WITHOUT EXTERNAL SOURCES FOR EXAMPLE MATHEMATICAL FACTS, BASIC SCIENTIFIC KNOWLEDGE, COMMON HISTORICAL EVENTS, ETC.
+1. skipSearch (boolean): Deeply analyze whether the user's query can be answered without performing any search.
+   - Set it to true if the query is straightforward, factual, or can be answered based on general knowledge.
+   - Set it to true for writing tasks or greeting messages that do not require external information.
+   - Set it to true if weather, stock, or similar widgets can fully satisfy the user's request.
+   - Set it to false if the query requires up-to-date information, specific details, or context that cannot be inferred from general knowledge.
+   - ALWAYS SET SKIPSEARCH TO FALSE IF YOU ARE UNCERTAIN OR IF THE QUERY IS AMBIGUOUS OR IF YOU'RE NOT SURE.
+2. personalSearch (boolean): Determine if the query requires searching through user uploaded documents.
+   - Set it to true if the query explicitly references or implies the need to access user-uploaded documents for example "Determine the key points from the document I uploaded about..." or "Who is the author?", "Summarize the content of the document"
+   - Set it to false if the query does not reference user-uploaded documents or if the information can be obtained through general web search.
+   - ALWAYS SET PERSONALSEARCH TO FALSE IF YOU ARE UNCERTAIN OR IF THE QUERY IS AMBIGUOUS OR IF YOU'RE NOT SURE. AND SET SKIPSEARCH TO FALSE AS WELL.
+3. academicSearch (boolean): Assess whether the query requires searching academic databases or scholarly articles.
+   - Set it to true if the query explicitly requests scholarly information, research papers, academic articles, or citations for example "Find recent studies on...", "What does the latest research say about...", or "Provide citations for..."
+   - Set it to false if the query can be answered through general web search or does not specifically request academic sources.
+4. discussionSearch (boolean): Evaluate if the query necessitates searching through online forums, discussion boards, or community Q&A platforms.
+   - Set it to true if the query seeks opinions, personal experiences, community advice, or discussions for example "What do people think about...", "Are there any discussions on...", or "What are the common issues faced by..."
+   - Set it to true if they're asking for reviews or feedback from users on products, services, or experiences.
+   - Set it to false if the query can be answered through general web search or does not specifically request information from discussion platforms.
+5. showWeatherWidget (boolean): Decide if displaying a weather widget would adequately address the user's query.
+   - Set it to true if the user's query is specifically about current weather conditions, forecasts, or any weather-related information for a particular location.
+   - Set it to true for queries like "What's the weather like in [Location]?" or "Will it rain tomorrow in [Location]?" or "Show me the weather" (Here they mean weather of their current location).
+   - If it can fully answer the user query without needing additional search, set skipSearch to true as well.
+6. showStockWidget (boolean): Determine if displaying a stock market widget would sufficiently fulfill the user's request.
+   - Set it to true if the user's query is specifically about current stock prices or stock related information for particular companies. Never use it for a market analysis or news about stock market.
+   - Set it to true for queries like "What's the stock price of [Company]?" or "How is the [Stock] performing today?" or "Show me the stock prices" (Here they mean stocks of companies they are interested in).
+   - If it can fully answer the user query without needing additional search, set skipSearch to true as well.
+7. showCalculationWidget (boolean): Decide if displaying a calculation widget would adequately address the user's query.
+   - Set it to true if the user's query involves mathematical calculations, conversions, or any computation-related tasks.
+   - Set it to true for queries like "What is 25% of 80?" or "Convert 100 USD to EUR" or "Calculate the square root of 256" or "What is 2 * 3 + 5?" or other mathematical expressions.
+   - If it can fully answer the user query without needing additional search, set skipSearch to true as well.
+</labels>
+
+<standalone_followup>
+For the standalone follow up, you have to generate a self contained, context independant reformulation of the user's query.
+You basically have to rephrase the user's query in a way that it can be understood without any prior context from the conversation history.
+Say for example the converastion is about cars and the user says "How do they work" then the standalone follow up should be "How do cars work?"
+
+Do not contain excess information or everything that has been discussed before, just reformulate the user's last query in a self contained manner.
+The standalone follow-up should be concise and to the point.
+</standalone_followup>
+
+<output_format>
+You must respond in the following JSON format without any extra text, explanations or filler sentences:
+{
+  "classification": {
+    "skipSearch": boolean,
+    "personalSearch": boolean,
+    "academicSearch": boolean,
+    "discussionSearch": boolean,
+    "showWeatherWidget": boolean,
+    "showStockWidget": boolean,
+    "showCalculationWidget": boolean,
+  },
+  "standaloneFollowUp": string
+}
+</output_format>
+`;var f=c(80202);let g=d.Ay$.object({classification:d.Ay$.object({skipSearch:d.Ay$.boolean().describe("Indicates whether to skip the search step."),personalSearch:d.Ay$.boolean().describe("Indicates whether to perform a personal search."),academicSearch:d.Ay$.boolean().describe("Indicates whether to perform an academic search."),discussionSearch:d.Ay$.boolean().describe("Indicates whether to perform a discussion search."),showWeatherWidget:d.Ay$.boolean().describe("Indicates whether to show the weather widget."),showStockWidget:d.Ay$.boolean().describe("Indicates whether to show the stock widget."),showCalculationWidget:d.Ay$.boolean().describe("Indicates whether to show the calculation widget.")}),standaloneFollowUp:d.Ay$.string().describe("A self-contained, context-independent reformulation of the user's question.")}),h=async a=>await a.llm.generateObject({messages:[{role:"system",content:e},{role:"user",content:`<conversation_history>
+${(0,f.A)(a.chatHistory)}
+</conversation_history>
+<user_query>
+${a.query}
+</user_query>`}],schema:g})},56471:(a,b,c)=>{c.d(b,{n:()=>e});var d=c(91922);let e=async(a,b)=>{let c=(0,d.Gg)(),e=new URL(`${c}/search?format=json`);e.searchParams.append("q",a),b&&Object.keys(b).forEach(a=>{let c=b[a];Array.isArray(c)?e.searchParams.append(a,c.join(",")):e.searchParams.append(a,c)});let f=await fetch(e),g=await f.json();return{results:g.results,suggestions:g.suggestions}}},57917:(a,b,c)=>{c.d(b,{A:()=>h});var d=c(46901),e=c(56471);let f=d.Ay$.object({queries:d.Ay$.array(d.Ay$.string()).describe("List of social search queries")}),g=`
+Use this tool to perform social media searches for relevant posts, discussions, and trends related to the user's query. Provide a list of concise search queries that will help gather comprehensive social media information on the topic at hand.
+You can provide up to 3 queries at a time. Make sure the queries are specific and relevant to the user's needs.
+
+For example, if the user is interested in public opinion on electric vehicles, your queries could be:
+1. "Electric vehicles public opinion 2024"
+2. "Social media discussions on EV adoption"
+3. "Trends in electric vehicle usage"
+
+If this tool is present and no other tools are more relevant, you MUST use this tool to get the needed social media information.
+`,h={name:"social_search",schema:f,getDescription:()=>g,getToolDescription:()=>"Use this tool to perform social media searches for relevant posts, discussions, and trends related to the user's query. Provide a list of concise search queries that will help gather comprehensive social media information on the topic at hand.",enabled:a=>a.sources.includes("discussions")&&!1===a.classification.classification.skipSearch&&!0===a.classification.classification.discussionSearch,execute:async(a,b)=>{a.queries=a.queries.slice(0,3);let c=b.session.getBlock(b.researchBlockId);c&&"research"===c.type&&(c.data.subSteps.push({type:"searching",id:crypto.randomUUID(),searching:a.queries}),b.session.updateBlock(b.researchBlockId,[{op:"replace",path:"/data/subSteps",value:c.data.subSteps}]));let d=crypto.randomUUID(),f=!1,g=[],h=async a=>{let h=(await (0,e.n)(a,{engines:["reddit"]})).results.map(a=>({content:a.content||a.title,metadata:{title:a.title,url:a.url}}));if(g.push(...h),!f&&c&&"research"===c.type)f=!0,c.data.subSteps.push({id:d,type:"search_results",reading:h}),b.session.updateBlock(b.researchBlockId,[{op:"replace",path:"/data/subSteps",value:c.data.subSteps}]);else if(f&&c&&"research"===c.type){let a=c.data.subSteps.findIndex(a=>a.id===d);c.data.subSteps[a].reading.push(...h),b.session.updateBlock(b.researchBlockId,[{op:"replace",path:"/data/subSteps",value:c.data.subSteps}])}};return await Promise.all(a.queries.map(h)),{type:"search_results",results:g}}}},67249:(a,b,c)=>{c.d(b,{A:()=>h});var d=c(46901),e=c(56471);let f=d.Ay$.object({queries:d.Ay$.array(d.Ay$.string()).describe("List of academic search queries")}),g=`
+Use this tool to perform academic searches for scholarly articles, papers, and research studies relevant to the user's query. Provide a list of concise search queries that will help gather comprehensive academic information on the topic at hand.
+You can provide up to 3 queries at a time. Make sure the queries are specific and relevant to the user's needs.
+
+For example, if the user is interested in recent advancements in renewable energy, your queries could be:
+1. "Recent advancements in renewable energy 2024"
+2. "Cutting-edge research on solar power technologies"
+3. "Innovations in wind energy systems"
+
+If this tool is present and no other tools are more relevant, you MUST use this tool to get the needed academic information.
+`,h={name:"academic_search",schema:f,getDescription:()=>g,getToolDescription:()=>"Use this tool to perform academic searches for scholarly articles, papers, and research studies relevant to the user's query. Provide a list of concise search queries that will help gather comprehensive academic information on the topic at hand.",enabled:a=>a.sources.includes("academic")&&!1===a.classification.classification.skipSearch&&!0===a.classification.classification.academicSearch,execute:async(a,b)=>{a.queries=a.queries.slice(0,3);let c=b.session.getBlock(b.researchBlockId);c&&"research"===c.type&&(c.data.subSteps.push({type:"searching",id:crypto.randomUUID(),searching:a.queries}),b.session.updateBlock(b.researchBlockId,[{op:"replace",path:"/data/subSteps",value:c.data.subSteps}]));let d=crypto.randomUUID(),f=!1,g=[],h=async a=>{let h=(await (0,e.n)(a,{engines:["arxiv","google scholar","pubmed"]})).results.map(a=>({content:a.content||a.title,metadata:{title:a.title,url:a.url}}));if(g.push(...h),!f&&c&&"research"===c.type)f=!0,c.data.subSteps.push({id:d,type:"search_results",reading:h}),b.session.updateBlock(b.researchBlockId,[{op:"replace",path:"/data/subSteps",value:c.data.subSteps}]);else if(f&&c&&"research"===c.type){let a=c.data.subSteps.findIndex(a=>a.id===d);c.data.subSteps[a].reading.push(...h),b.session.updateBlock(b.researchBlockId,[{op:"replace",path:"/data/subSteps",value:c.data.subSteps}])}};return await Promise.all(a.queries.map(h)),{type:"search_results",results:g}}}},69899:(a,b,c)=>{c.d(b,{K:()=>d});let d=(a,b,c)=>`
+You are Perplexica, an AI model skilled in web search and crafting detailed, engaging, and well-structured answers. You excel at summarizing web pages and extracting relevant information to create professional, blog-style responses.
+
+    Your task is to provide answers that are:
+    - **Informative and relevant**: Thoroughly address the user's query using the given context.
+    - **Well-structured**: Include clear headings and subheadings, and use a professional tone to present information concisely and logically.
+    - **Engaging and detailed**: Write responses that read like a high-quality blog post, including extra details and relevant insights.
+    - **Cited and credible**: Use inline citations with [number] notation to refer to the context source(s) for each fact or detail included.
+    - **Explanatory and Comprehensive**: Strive to explain the topic in depth, offering detailed analysis, insights, and clarifications wherever applicable.
+
+    ### Formatting Instructions
+    - **Structure**: Use a well-organized format with proper headings (e.g., "## Example heading 1" or "## Example heading 2"). Present information in paragraphs or concise bullet points where appropriate.
+    - **Tone and Style**: Maintain a neutral, journalistic tone with engaging narrative flow. Write as though you're crafting an in-depth article for a professional audience.
+    - **Markdown Usage**: Format your response with Markdown for clarity. Use headings, subheadings, bold text, and italicized words as needed to enhance readability.
+    - **Length and Depth**: Provide comprehensive coverage of the topic. Avoid superficial responses and strive for depth without unnecessary repetition. Expand on technical or complex topics to make them easier to understand for a general audience.
+    - **No main heading/title**: Start your response directly with the introduction unless asked to provide a specific title.
+    - **Conclusion or Summary**: Include a concluding paragraph that synthesizes the provided information or suggests potential next steps, where appropriate.
+
+    ### Citation Requirements
+    - Cite every single fact, statement, or sentence using [number] notation corresponding to the source from the provided \`context\`.
+    - Integrate citations naturally at the end of sentences or clauses as appropriate. For example, "The Eiffel Tower is one of the most visited landmarks in the world[1]."
+    - Ensure that **every sentence in your response includes at least one citation**, even when information is inferred or connected to general knowledge available in the provided context.
+    - Use multiple sources for a single detail if applicable, such as, "Paris is a cultural hub, attracting millions of visitors annually[1][2]."
+    - Always prioritize credibility and accuracy by linking all statements back to their respective context sources.
+    - Avoid citing unsupported assumptions or personal interpretations; if no source supports a statement, clearly indicate the limitation.
+
+    ### Special Instructions
+    - If the query involves technical, historical, or complex topics, provide detailed background and explanatory sections to ensure clarity.
+    - If the user provides vague input or if relevant information is missing, explain what additional details might help refine the search.
+    - If no relevant information is found, say: "Hmm, sorry I could not find any relevant information on this topic. Would you like me to search again or ask something else?" Be transparent about limitations and suggest alternatives or ways to reframe the query.
+    ${"quality"===c?"- YOU ARE CURRENTLY SET IN QUALITY MODE, GENERATE VERY DEEP, DETAILED AND COMPREHENSIVE RESPONSES USING THE FULL CONTEXT PROVIDED. ASSISTANT'S RESPONSES SHALL NOT BE LESS THAN AT LEAST 2000 WORDS, COVER EVERYTHING AND FRAME IT LIKE A RESEARCH REPORT.":""}
+    
+    ### User instructions
+    These instructions are shared to you by the user and not by the system. You will have to follow them but give them less priority than the above instructions. If the user has provided specific instructions or preferences, incorporate them into your response while adhering to the overall guidelines.
+    ${b}
+
+    ### Example Output
+    - Begin with a brief introduction summarizing the event or query topic.
+    - Follow with detailed sections under clear headings, covering all aspects of the query if possible.
+    - Provide explanations or historical context as needed to enhance understanding.
+    - End with a conclusion or overall perspective if relevant.
+
+    <context>
+    ${a}
+    </context>
+
+    Current date & time in ISO format (UTC timezone) is: ${new Date().toISOString()}.
+`},72429:(a,b,c)=>{c.a(a,async(a,d)=>{try{c.d(b,{A:()=>j});var e=c(22311),f=c(25341),g=c(15165),h=a([e]);e=(h.then?(await h)():h)[0];class i{constructor(a){this.params=a,this.records=[],this.embeddingModel=a.embeddingModel,this.fileIds=a.fileIds,this.initializeStore()}initializeStore(){this.fileIds.forEach(a=>{let b=e.A.getFile(a);if(!b)throw Error(`File with ID ${a} not found`);let c=e.A.getFileChunks(a);this.records.push(...c.map(c=>({embedding:c.embedding,content:c.content,fileId:a,metadata:{fileName:b.name,title:b.name,url:`file_id://${b.id}`}})))})}async query(a,b){let c=await this.embeddingModel.embedText(a),d=[],e=[];await Promise.all(c.map(async a=>{let b=this.records.map((b,c)=>({chunk:{content:b.content,metadata:{...b.metadata,fileId:b.fileId}},score:(0,f.A)(a,b.embedding)})).sort((a,b)=>b.score-a.score);d.push(b),e.push(b.map(a=>(0,g.e)(a)))}));let h=new Map,i=new Map;for(let a=0;a<d.length;a++)for(let b=0;b<d[a].length;b++){let c=e[a][b];h.set(c,d[a][b].chunk),i.set(c,(i.get(c)||0)+d[a][b].score/(b+1+60))}return Array.from(i.entries()).sort((a,b)=>b[1]-a[1]).map(([a,b])=>h.get(a)).slice(0,b)}static getFileData(a){let b=[];return a.forEach(a=>{let c=e.A.getFile(a);if(!c)throw Error(`File with ID ${a} not found`);let d=e.A.getFileChunks(a);b.push({fileName:c.name,initialContent:d.slice(0,3).map(a=>a.content).join("\n---\n")})}),b}}let j=i;d()}catch(a){d(a)}})},80202:(a,b,c)=>{c.d(b,{A:()=>d});let d=a=>a.map(a=>`${"assistant"===a.role?"AI":"User"}: ${a.content}`).join("\n")},87044:(a,b,c)=>{c.a(a,async(a,d)=>{try{c.d(b,{A:()=>j});var e=c(19644),f=c(43090),g=c(80202),h=a([e,f]);[e,f]=h.then?(await h)():h;class i{async research(a,b){let c=[],d="speed"===b.config.mode?2:"balanced"===b.config.mode?6:25,h=e.s.getAvailableActionTools({classification:b.classification,fileIds:b.config.fileIds,mode:b.config.mode,sources:b.config.sources}),i=e.s.getAvailableActionsDescriptions({classification:b.classification,fileIds:b.config.fileIds,mode:b.config.mode,sources:b.config.sources}),j=crypto.randomUUID();a.emitBlock({id:j,type:"research",data:{subSteps:[]}});let k=[{role:"user",content:`
+          <conversation>
+          ${(0,g.A)(b.chatHistory.slice(-10))}
+           User: ${b.followUp} (Standalone question: ${b.classification.standaloneFollowUp})
+           </conversation>
+        `}];for(let g=0;g<d;g++){let l=(0,f.b)(i,b.config.mode,g,d,b.config.fileIds),m=b.config.llm.streamText({messages:[{role:"system",content:l},...k],tools:h}),n=a.getBlock(j),o=!1,p=crypto.randomUUID(),q=[];for await(let b of m)b.toolCallChunk.length>0&&b.toolCallChunk.forEach(b=>{if("__reasoning_preamble"===b.name&&b.arguments.plan&&!o&&n&&"research"===n.type)o=!0,n.data.subSteps.push({id:p,type:"reasoning",reasoning:b.arguments.plan}),a.updateBlock(j,[{op:"replace",path:"/data/subSteps",value:n.data.subSteps}]);else if("__reasoning_preamble"===b.name&&b.arguments.plan&&o&&n&&"research"===n.type){let c=n.data.subSteps.findIndex(a=>a.id===p);-1!==c&&(n.data.subSteps[c].reasoning=b.arguments.plan,a.updateBlock(j,[{op:"replace",path:"/data/subSteps",value:n.data.subSteps}]))}let c=q.findIndex(a=>a.id===b.id);-1!==c?q[c].arguments=b.arguments:q.push(b)});if(0===q.length||"done"===q[q.length-1].name)break;k.push({role:"assistant",content:"",tool_calls:q});let r=await e.s.executeAll(q,{llm:b.config.llm,embedding:b.config.embedding,session:a,researchBlockId:j,fileIds:b.config.fileIds});c.push(...r),r.forEach((a,b)=>{k.push({role:"tool",id:q[b].id,name:q[b].name,content:JSON.stringify(a)})})}let l=c.filter(a=>"search_results"===a.type).flatMap(a=>a.results),m=new Map,n=l.map((a,b)=>{if(a.metadata.url&&!m.has(a.metadata.url))m.set(a.metadata.url,b);else if(a.metadata.url&&m.has(a.metadata.url)){let b=l[m.get(a.metadata.url)];b.content+=`
+
+${a.content}`;return}return a}).filter(a=>void 0!==a);return a.emitBlock({id:crypto.randomUUID(),type:"source",data:n}),{findings:c,searchFindings:n}}}let j=i;d()}catch(a){d(a)}})},91421:(a,b,c)=>{c.d(b,{A:()=>h});var d=c(46901);let e=new(c(33270)).A,f=d.Ay$.object({urls:d.Ay$.array(d.Ay$.string()).describe("A list of URLs to scrape content from.")}),g=`
+Use this tool to scrape and extract content from the provided URLs. This is useful when you the user has asked you to extract or summarize information from specific web pages. You can provide up to 3 URLs at a time. NEVER CALL THIS TOOL EXPLICITLY YOURSELF UNLESS INSTRUCTED TO DO SO BY THE USER.
+You should only call this tool when the user has specifically requested information from certain web pages, never call this yourself to get extra information without user instruction.
+
+For example, if the user says "Please summarize the content of https://example.com/article", you can call this tool with that URL to get the content and then provide the summary or "What does X mean according to https://example.com/page", you can call this tool with that URL to get the content and provide the explanation.
+`,h={name:"scrape_url",schema:f,getToolDescription:()=>"Use this tool to scrape and extract content from the provided URLs. This is useful when you the user has asked you to extract or summarize information from specific web pages. You can provide up to 3 URLs at a time. NEVER CALL THIS TOOL EXPLICITLY YOURSELF UNLESS INSTRUCTED TO DO SO BY THE USER.",getDescription:()=>g,enabled:a=>!0,execute:async(a,b)=>{a.urls=a.urls.slice(0,3);let c=crypto.randomUUID(),d=!1,f=b.session.getBlock(b.researchBlockId),g=[];return await Promise.all(a.urls.map(async a=>{try{let h=await fetch(a),i=await h.text(),j=i.match(/<title>(.*?)<\/title>/i)?.[1]||`Content from ${a}`;if(!d&&f&&"research"===f.type)d=!0,f.data.subSteps.push({id:c,type:"reading",reading:[{content:"",metadata:{url:a,title:j}}]}),b.session.updateBlock(b.researchBlockId,[{op:"replace",path:"/data/subSteps",value:f.data.subSteps}]);else if(d&&f&&"research"===f.type){let d=f.data.subSteps.findIndex(a=>a.id===c);f.data.subSteps[d].reading.push({content:"",metadata:{url:a,title:j}}),b.session.updateBlock(b.researchBlockId,[{op:"replace",path:"/data/subSteps",value:f.data.subSteps}])}let k=e.turndown(i);g.push({content:k,metadata:{url:a,title:j}})}catch(b){g.push({content:`Failed to fetch content from ${a}: ${b}`,metadata:{url:a,title:`Error fetching ${a}`}})}})),{type:"search_results",results:g}}}},92654:(a,b,c)=>{c.d(b,{A:()=>f});var d=c(46901);let e=`
+Use this action ONLY when you have completed all necessary research and are ready to provide a final answer to the user. This indicates that you have gathered sufficient information from previous steps and are concluding the research process.
+YOU MUST CALL THIS ACTION TO SIGNAL COMPLETION; DO NOT OUTPUT FINAL ANSWERS DIRECTLY TO THE USER.
+IT WILL BE AUTOMATICALLY TRIGGERED IF MAXIMUM ITERATIONS ARE REACHED SO IF YOU'RE LOW ON ITERATIONS, DON'T CALL IT AND INSTEAD FOCUS ON GATHERING ESSENTIAL INFO FIRST.
+`,f={name:"done",schema:d.Ay$.object({}),getToolDescription:()=>"Only call this after __reasoning_preamble AND after any other needed tool calls when you truly have enough to answer. Do not call if information is still missing.",getDescription:()=>e,enabled:a=>!0,execute:async(a,b)=>({type:"done"})}}};
