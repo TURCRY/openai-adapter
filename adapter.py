@@ -380,10 +380,12 @@ LOCAL_MODELS = [m.strip() for m in os.getenv("LOCAL_MODELS", "").split(",") if m
 MODEL_ALIAS = {
     # LLMs
     "local-mistral": "Mistral_7B",
+    "local-mistral-openai": "Mistral_7B",
     "local-gpt-oss_20B": "GPT_OSS_20B_4BIT",
     "local-llama3": "LLaMA_3_8B",
     "local-llama2": "LLaMA_2_7B",
     "local-gemma": "Gemma_7B",
+    "local-gemma-4": "Gemma_4_12B_It_Q4_K_M",
     "local-phi2": "Phi-2_7B",
     "local-Qwen_2_5_0_5B": "Qwen_2_5_0_5B",
     "local-Falcon3_10B": "Falcon3_10B",
@@ -407,6 +409,12 @@ MODEL_ALIAS = {
     "pass3e_local": "Qwen_2_5_14B",
     "pass3e_local_alt": "DeepSeek_R1_7B",
 
+}
+
+
+LOCAL_OPENAI_CHAT_ALIASES = {
+    "local-gemma-4",
+    "local-mistral-openai",
 }
 
 
@@ -2714,12 +2722,463 @@ async def _local_chat(
                     or str(j))
         return str(j)
 
+
+def _is_json_schema_response_format(response_format: dict | None) -> bool:
+    if not isinstance(response_format, dict):
+        return False
+    if response_format.get("type") != "json_schema":
+        return False
+    json_schema = response_format.get("json_schema")
+    return isinstance(json_schema, dict) and isinstance(json_schema.get("schema"), dict)
+
+
+def _local_openai_chat_payload(
+    *,
+    requested_model: str,
+    messages: list[dict],
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    response_format: dict | None = None,
+    tools: list | None = None,
+    tool_choice: Any | None = None,
+    parallel_tool_calls: bool | None = None,
+    stream: bool = False,
+) -> dict:
+    real_model = MODEL_ALIAS.get(requested_model, requested_model)
+    payload: dict[str, Any] = {
+        "model": real_model,
+        "messages": messages,
+        "stream": bool(stream),
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    if response_format is not None:
+        payload["response_format"] = response_format
+    if tools is not None:
+        payload["tools"] = tools
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
+    if parallel_tool_calls is not None:
+        payload["parallel_tool_calls"] = parallel_tool_calls
+    return payload
+
+
+_PERPLEXICA_DIAG_TERMS = ("Rennes", "Bretagne", "Historia", "context", "sources", "search results")
+
+
+def _perplexica_diag_enabled(requested_model: str) -> bool:
+    return requested_model == "local-gemma-4"
+
+
+def _perplexica_diag_req_id() -> str:
+    return uuid4().hex[:8]
+
+
+def _perplexica_diag_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+        return "\n".join(parts)
+    if value is None:
+        return ""
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return str(value)
+
+
+def _perplexica_diag_content_len(value: Any) -> int:
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, list):
+        total = 0
+        for item in value:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    total += len(text)
+                else:
+                    total += len(str(item.get("type", "")))
+            else:
+                total += len(str(item))
+        return total
+    if value is None:
+        return 0
+    return len(str(value))
+
+
+def _perplexica_diag_terms(text: str) -> dict[str, bool]:
+    lower = text.lower()
+    return {term: term.lower() in lower for term in _PERPLEXICA_DIAG_TERMS}
+
+
+def _perplexica_diag_terms_str(text: str) -> str:
+    return " ".join(f"{term}={present}" for term, present in _perplexica_diag_terms(text).items())
+
+
+def _perplexica_diag_redact(text: str) -> str:
+    text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", text)
+    text = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "sk-[redacted]", text)
+    text = re.sub(r"(?i)\b(api[_-]?key|authorization|cookie|token|secret)\s*[:=]\s*['\"]?[^'\"\s,;]+", r"\1=[redacted]", text)
+    text = re.sub(r"https?://\S+", "[url]", text)
+    return text
+
+
+def _perplexica_diag_excerpt(text: str, *, tail: bool = False) -> str:
+    text = re.sub(r"\s+", " ", text.replace("\r", "\n").replace("\n", " ")).strip()
+    text = text[-300:] if tail else text[:300]
+    return _perplexica_diag_redact(text)
+
+
+def _perplexica_diag_multimodal_summary(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+    blocks: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            blocks.append(type(item).__name__)
+            continue
+        block_type = str(item.get("type") or "dict")
+        text_len = len(item.get("text")) if isinstance(item.get("text"), str) else 0
+        blocks.append(f"{block_type}:text_len={text_len}")
+    return "[" + ",".join(blocks) + "]"
+
+
+def _perplexica_diag_response(raw: dict) -> tuple[str, str, int, bool, str]:
+    model = str(raw.get("model") or "") if isinstance(raw, dict) else ""
+    finish_reason = ""
+    content = ""
+    if isinstance(raw, dict):
+        choices = raw.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0] if isinstance(choices[0], dict) else {}
+            finish_reason = str(first.get("finish_reason") or "")
+            message = first.get("message") if isinstance(first.get("message"), dict) else {}
+            content_value = message.get("content")
+            if content_value is None:
+                delta = first.get("delta") if isinstance(first.get("delta"), dict) else {}
+                content_value = delta.get("content")
+            content = _perplexica_diag_text(content_value)
+        if not content:
+            content = _perplexica_diag_text(raw.get("content") or raw.get("text") or raw.get("response"))
+    return model, finish_reason, len(content), isinstance(raw, dict) and "parsed" in raw, _perplexica_diag_terms_str(content)
+
+
+
+def _tool_call_diag_message_counts(messages: Any) -> tuple[int, int, int]:
+    if not isinstance(messages, list):
+        return 0, 0, 0
+    tool_messages = 0
+    tool_call_ids = 0
+    assistant_tool_calls = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "tool":
+            tool_messages += 1
+        if msg.get("tool_call_id"):
+            tool_call_ids += 1
+        calls = msg.get("tool_calls")
+        if msg.get("role") == "assistant" and isinstance(calls, list):
+            assistant_tool_calls += len(calls)
+    return tool_messages, tool_call_ids, assistant_tool_calls
+
+
+def _tool_call_diag_tools_count(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _tool_call_diag_response_count(raw: Any) -> int:
+    if not isinstance(raw, dict):
+        return 0
+    total = 0
+    for choice in raw.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        for key in ("message", "delta"):
+            obj = choice.get(key)
+            if isinstance(obj, dict) and isinstance(obj.get("tool_calls"), list):
+                total += len(obj.get("tool_calls") or [])
+    return total
+
+
+def _log_tool_call_diag_request(requested_model: str, payload: dict, *, raw_body: dict | None = None) -> None:
+    if requested_model != "local-gemma-4":
+        return
+    body = raw_body if isinstance(raw_body, dict) else payload
+    messages = body.get("messages")
+    tool_messages, tool_call_ids, assistant_tool_calls = _tool_call_diag_message_counts(messages)
+    log.info(
+        "[tool_call_diag] requested_model=%s tools_count=%s tool_choice=%r parallel_tool_calls=%r "
+        "tool_messages=%s tool_call_id_messages=%s assistant_tool_calls=%s",
+        requested_model,
+        _tool_call_diag_tools_count(body.get("tools")),
+        body.get("tool_choice"),
+        body.get("parallel_tool_calls"),
+        tool_messages,
+        tool_call_ids,
+        assistant_tool_calls,
+    )
+
+
+def _log_tool_call_diag_forward(requested_model: str, payload: dict) -> None:
+    if requested_model != "local-gemma-4":
+        return
+    tool_messages, tool_call_ids, assistant_tool_calls = _tool_call_diag_message_counts(payload.get("messages"))
+    log.info(
+        "[tool_call_diag] forward_to_flask requested_model=%s flask_model=%s tools_count=%s tool_choice=%r "
+        "parallel_tool_calls=%r tool_messages=%s tool_call_id_messages=%s assistant_tool_calls=%s",
+        requested_model,
+        payload.get("model"),
+        _tool_call_diag_tools_count(payload.get("tools")),
+        payload.get("tool_choice"),
+        payload.get("parallel_tool_calls"),
+        tool_messages,
+        tool_call_ids,
+        assistant_tool_calls,
+    )
+
+
+def _log_tool_call_diag_response(requested_model: str, raw: Any) -> None:
+    if requested_model != "local-gemma-4":
+        return
+    log.info(
+        "[tool_call_diag] response_from_flask requested_model=%s tool_calls_count=%s",
+        requested_model,
+        _tool_call_diag_response_count(raw),
+    )
+
+def _perplexica_diag_log_request(req_id: str, requested_model: str, payload: dict) -> None:
+    if not _perplexica_diag_enabled(requested_model):
+        return
+    messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+    response_format = payload.get("response_format")
+    response_format_type = response_format.get("type") if isinstance(response_format, dict) else type(response_format).__name__ if response_format is not None else "none"
+    total_chars = sum(_perplexica_diag_content_len(m.get("content")) for m in messages if isinstance(m, dict))
+    log.info(
+        "[perplexica_diag] req=%s model=%s flask_model=%s stream=%s response_format=%s messages=%s chars=%s",
+        req_id,
+        requested_model,
+        payload.get("model"),
+        bool(payload.get("stream")),
+        response_format_type,
+        len(messages),
+        total_chars,
+    )
+    last_system = ""
+    last_user = ""
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            log.info("[perplexica_diag] req=%s msg[%s] type=%s", req_id, idx, type(msg).__name__)
+            continue
+        role = str(msg.get("role") or "")
+        content = msg.get("content")
+        text = _perplexica_diag_text(content)
+        content_type = type(content).__name__
+        multimodal = _perplexica_diag_multimodal_summary(content)
+        log.info(
+            "[perplexica_diag] req=%s msg[%s] role=%s type=%s len=%s %s%s",
+            req_id,
+            idx,
+            role,
+            content_type,
+            _perplexica_diag_content_len(content),
+            _perplexica_diag_terms_str(text),
+            f" blocks={multimodal}" if multimodal else "",
+        )
+        if role == "system":
+            last_system = text
+        elif role == "user":
+            last_user = text
+    if last_system:
+        log.info("[perplexica_diag] req=%s last_system_head=%r", req_id, _perplexica_diag_excerpt(last_system))
+        log.info("[perplexica_diag] req=%s last_system_tail=%r", req_id, _perplexica_diag_excerpt(last_system, tail=True))
+    if last_user:
+        log.info("[perplexica_diag] req=%s last_user_head=%r", req_id, _perplexica_diag_excerpt(last_user))
+        log.info("[perplexica_diag] req=%s last_user_tail=%r", req_id, _perplexica_diag_excerpt(last_user, tail=True))
+
+async def _local_chat_openai(
+    *,
+    requested_model: str,
+    messages: list[dict],
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    response_format: dict | None = None,
+    tools: list | None = None,
+    tool_choice: Any | None = None,
+    parallel_tool_calls: bool | None = None,
+    stream: bool = False,
+) -> dict:
+    if not await _ensure_local_ready():
+        raise HTTPException(status_code=502, detail="Local LLM unreachable after WOL attempt")
+    payload = _local_openai_chat_payload(
+        requested_model=requested_model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        response_format=response_format,
+        tools=tools,
+        tool_choice=tool_choice,
+        parallel_tool_calls=parallel_tool_calls,
+        stream=stream,
+    )
+    _log_tool_call_diag_forward(requested_model, payload)
+    diag_req = _perplexica_diag_req_id()
+    _perplexica_diag_log_request(diag_req, requested_model, payload)
+    r = await _local_request_once_with_runtime_fallback(
+        "POST",
+        "/chat_openai",
+        timeout=TIMEOUT_LOCAL,
+        json=payload,
+        headers=_llm_headers(),
+    )
+    j = r.json()
+    raw = j if isinstance(j, dict) else {"content": str(j)}
+    _log_tool_call_diag_response(requested_model, raw)
+    if _perplexica_diag_enabled(requested_model):
+        model_out, finish_reason, answer_len, has_parsed, terms = _perplexica_diag_response(raw)
+        log.info(
+            "[perplexica_diag] req=%s flask_status=%s model_out=%s finish=%s answer_len=%s parsed=%s %s",
+            diag_req,
+            getattr(r, "status_code", "?"),
+            model_out,
+            finish_reason,
+            answer_len,
+            has_parsed,
+            terms,
+        )
+    return raw
+
+
+def _local_chat_openai_content(raw: dict) -> str:
+    choices = raw.get("choices") if isinstance(raw, dict) else None
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        message = first.get("message") if isinstance(first.get("message"), dict) else {}
+        content = message.get("content")
+        if content is not None:
+            return content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        delta = first.get("delta") if isinstance(first.get("delta"), dict) else {}
+        content = delta.get("content")
+        if content is not None:
+            return content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    for key in ("content", "text", "output", "response"):
+        value = raw.get(key) if isinstance(raw, dict) else None
+        if value is not None:
+            return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return ""
+
+
+async def _local_chat_openai_stream_generator(
+    *,
+    requested_model: str,
+    messages: list[dict],
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    response_format: dict | None = None,
+    tools: list | None = None,
+    tool_choice: Any | None = None,
+    parallel_tool_calls: bool | None = None,
+):
+    if _is_json_schema_response_format(response_format):
+        raw = await _local_chat_openai(
+            requested_model=requested_model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            tools=tools,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            stream=False,
+        )
+        chunk_id = "chatcmpl_" + uuid4().hex
+        created = int(time.time())
+        content = _local_chat_openai_content(raw)
+        yield _chat_sse_data(_chat_completion_chunk(chunk_id=chunk_id, created=created, model=requested_model, delta={"role": "assistant"}))
+        if content:
+            yield _chat_sse_data(_chat_completion_chunk(chunk_id=chunk_id, created=created, model=requested_model, delta={"content": content}))
+        yield _chat_sse_data(_chat_completion_chunk(chunk_id=chunk_id, created=created, model=requested_model, finish_reason="stop"))
+        yield _chat_sse_data("[DONE]")
+        return
+
+    if not await _ensure_local_ready():
+        raise HTTPException(status_code=502, detail="Local LLM unreachable after WOL attempt")
+    payload = _local_openai_chat_payload(
+        requested_model=requested_model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        response_format=response_format,
+        tools=tools,
+        tool_choice=tool_choice,
+        parallel_tool_calls=parallel_tool_calls,
+        stream=True,
+    )
+    _log_tool_call_diag_forward(requested_model, payload)
+    diag_req = _perplexica_diag_req_id()
+    _perplexica_diag_log_request(diag_req, requested_model, payload)
+    url = f"{LOCAL_BASE}/chat_openai"
+    stream_model = ""
+    stream_finish = ""
+    stream_parts: list[str] = []
+    async with httpx.AsyncClient(timeout=TIMEOUT_LOCAL) as client:
+        async with client.stream("POST", url, json=payload, headers=_llm_headers()) as r:
+            if _perplexica_diag_enabled(requested_model):
+                log.info("[perplexica_diag] req=%s flask_status=%s stream_relay=native", diag_req, getattr(r, "status_code", "?"))
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if line:
+                    if _perplexica_diag_enabled(requested_model):
+                        raw_line = line.strip()
+                        if raw_line.startswith("data:"):
+                            raw_line = raw_line[5:].strip()
+                        if raw_line and raw_line != "[DONE]":
+                            try:
+                                event = json.loads(raw_line)
+                                if isinstance(event, dict):
+                                    stream_model = str(event.get("model") or stream_model)
+                                    choices = event.get("choices")
+                                    if isinstance(choices, list) and choices:
+                                        first = choices[0] if isinstance(choices[0], dict) else {}
+                                        stream_finish = str(first.get("finish_reason") or stream_finish)
+                                        delta = first.get("delta") if isinstance(first.get("delta"), dict) else {}
+                                        message = first.get("message") if isinstance(first.get("message"), dict) else {}
+                                        content = delta.get("content") if delta.get("content") is not None else message.get("content")
+                                        if isinstance(content, str):
+                                            stream_parts.append(content)
+                            except Exception:
+                                pass
+                    yield line if line.endswith("\n\n") else f"{line}\n\n"
+            if _perplexica_diag_enabled(requested_model):
+                stream_content = "".join(stream_parts)
+                log.info(
+                    "[perplexica_diag] req=%s flask_status=%s model_out=%s finish=%s answer_len=%s parsed=False %s",
+                    diag_req,
+                    getattr(r, "status_code", "?"),
+                    stream_model,
+                    stream_finish,
+                    len(stream_content),
+                    _perplexica_diag_terms_str(stream_content),
+                )
 # -----------------------------------------------------------------------------
 # Schemas OpenAI compat
 # -----------------------------------------------------------------------------
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: Any | None = None
+    tool_call_id: str | None = None
+    tool_calls: list | None = None
+    name: str | None = None
 
 class ChatReq(BaseModel):
     model: str
@@ -2728,7 +3187,25 @@ class ChatReq(BaseModel):
     stream: bool | None = None
     metadata: dict | None = None
     response_format: dict | None = None
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    tools: list | None = None
+    tool_choice: Any | None = None
+    parallel_tool_calls: bool | None = None
 
+def _chat_message_dump(message: Any) -> dict:
+    if hasattr(message, "model_dump"):
+        try:
+            data = message.model_dump(exclude_none=True)
+        except TypeError:
+            data = message.model_dump()
+        if isinstance(data, dict):
+            if getattr(message, "content", None) is None and hasattr(message, "content") and "content" not in data:
+                data["content"] = None
+            return data
+    if isinstance(message, dict):
+        return {k: v for k, v in message.items() if v is not None or k == "content"}
+    return {"role": getattr(message, "role", ""), "content": getattr(message, "content", "")}
 class ChatRespChoice(BaseModel):
     index: int
     message: dict
@@ -2807,6 +3284,7 @@ async def list_models(authorization: t.Annotated[str | None, Header()] = None):
     _check_adapter_auth(authorization)
     data = []
     data += [{"id": m, "object": "model"} for m in LOCAL_MODELS]
+    data += [{"id": m, "object": "model"} for m in sorted(LOCAL_OPENAI_CHAT_ALIASES)]
     # Expose aussi les "modèles-route" (y.c. injectés via ENV)
     data += [{"id": k, "object": "model"} for k in LOCAL_ROUTE_MAP.keys()]
     data += [{"id": m, "object": "model"} for m in REMOTE_MODELS]
@@ -4173,6 +4651,7 @@ async def _chat_completions_stream_generator(
     max_tokens_override: int | None = None,
     tools: list[dict] | None = None,
     tool_choice: Any | None = None,
+    parallel_tool_calls: bool | None = None,
     reasoning: Any | None = None,
     app_id: str | None = None,
     conversation_id: str | None = None,
@@ -4212,6 +4691,20 @@ async def _chat_completions_stream_generator(
                 meta=metadata or {},
             )
             async for event in emit_synthetic_text(str(text)):
+                yield event
+            return
+
+        if requested_model in LOCAL_OPENAI_CHAT_ALIASES:
+            async for event in _local_chat_openai_stream_generator(
+                requested_model=requested_model,
+                messages=stream_messages,
+                temperature=temperature,
+                max_tokens=max_tokens_override,
+                response_format=response_format,
+                tools=tools,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+            ):
                 yield event
             return
 
@@ -4308,14 +4801,23 @@ async def chat_completions(
 ):
 
 
+    raw_body = None
+    try:
+        candidate = await request.json()
+        if isinstance(candidate, dict):
+            raw_body = candidate
+    except Exception:
+        raw_body = None
+
     _check_adapter_auth(authorization)
 
     model      = req.model
     canonical  = _resolve_model_id(model)
-    messages   = [m.model_dump() for m in req.messages]
+    messages   = [_chat_message_dump(m) for m in req.messages]
     temperature = req.temperature
     meta       = req.metadata or {}
     requested_response_format = req.response_format
+    _log_tool_call_diag_request(model, {"messages": messages}, raw_body=raw_body)
     log.info("[chat] meta_keys=%s", sorted(list((meta or {}).keys())))
     for k in ("conversation_id", "chat_id", "thread_id", "id"):
         if k in (meta or {}):
@@ -4380,6 +4882,8 @@ async def chat_completions(
 
 
 
+    max_tokens_override = getattr(req, "max_tokens", None) or getattr(req, "max_completion_tokens", None)
+
     if req.stream:
         if not messages:
             raise HTTPException(status_code=400, detail="No messages provided")
@@ -4391,12 +4895,10 @@ async def chat_completions(
                 temperature=temperature,
                 metadata=meta,
                 response_format=requested_response_format,
-                max_tokens_override=(
-                    getattr(req, "max_tokens", None)
-                    or getattr(req, "max_completion_tokens", None)
-                ),
+                max_tokens_override=max_tokens_override,
                 tools=getattr(req, "tools", None),
                 tool_choice=getattr(req, "tool_choice", None),
+                parallel_tool_calls=getattr(req, "parallel_tool_calls", None),
                 reasoning=getattr(req, "reasoning", None),
                 app_id=app_id,
                 conversation_id=conv_id,
@@ -4720,6 +5222,22 @@ async def chat_completions(
     # pas sur le nom canonique (canonical).
 
     if _is_local_model(model):
+        if model in LOCAL_OPENAI_CHAT_ALIASES:
+            try:
+                return await _local_chat_openai(
+                    requested_model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens_override,
+                    response_format=requested_response_format,
+                    tools=getattr(req, "tools", None),
+                    tool_choice=getattr(req, "tool_choice", None),
+                    parallel_tool_calls=getattr(req, "parallel_tool_calls", None),
+                    stream=False,
+                )
+            except Exception as e:
+                raise HTTPException(502, f"Local OpenAI LLM error: {e}")
+
         try:
             meta = meta or {}
             user_prompt = messages[-1]["content"]

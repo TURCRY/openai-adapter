@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import os
 import sys
@@ -121,6 +121,10 @@ class FakeStreamResponse:
 
     async def aread(self):
         return self.body.encode("utf-8")
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError("stream error", request=httpx.Request("POST", "http://test"), response=httpx.Response(self.status_code))
 class FakeAsyncClient:
     instances = []
     post_outcomes = []
@@ -148,7 +152,7 @@ class FakeAsyncClient:
             "data: [DONE]",
         ])
 
-    async def post(self, url, json=None, headers=None):
+    async def post(self, url, json=None, headers=None, **kwargs):
         self.calls.append({"url": url, "json": json, "headers": headers})
         if FakeAsyncClient.post_outcomes:
             outcome = FakeAsyncClient.post_outcomes.pop(0)
@@ -171,14 +175,16 @@ class FakeAsyncClient:
 
 
 class _Message:
-    def __init__(self, role, content):
+    def __init__(self, role, content, **extra):
         self.role = role
         self.content = content
+        self.extra = extra
 
-    def model_dump(self):
-        return {"role": self.role, "content": self.content}
-
-
+    def model_dump(self, **kwargs):
+        data = {"role": self.role, "content": self.content, **self.extra}
+        if kwargs.get("exclude_none"):
+            data = {k: v for k, v in data.items() if v is not None or k == "content"}
+        return data
 class _Request:
     headers = {}
 
@@ -311,6 +317,8 @@ class RemoteProviderModelTests(unittest.IsolatedAsyncioTestCase):
         self.old_remote_conf = adapter._REMOTE_CONF
         self.old_async_client = adapter.httpx.AsyncClient
         self.old_local_chat = adapter._local_chat
+        self.old_ensure_local_ready = adapter._ensure_local_ready
+        self.old_local_request_once = adapter._local_request_once_with_runtime_fallback
         self.old_adapter_api_key = adapter.ADAPTER_API_KEY
         self.old_local_models = list(adapter.LOCAL_MODELS)
         self.old_env = {
@@ -375,6 +383,8 @@ class RemoteProviderModelTests(unittest.IsolatedAsyncioTestCase):
         adapter._REMOTE_CONF = self.old_remote_conf
         adapter.httpx.AsyncClient = self.old_async_client
         adapter._local_chat = self.old_local_chat
+        adapter._ensure_local_ready = self.old_ensure_local_ready
+        adapter._local_request_once_with_runtime_fallback = self.old_local_request_once
         adapter.ADAPTER_API_KEY = self.old_adapter_api_key
         adapter.LOCAL_MODELS = self.old_local_models
         for key, value in self.old_env.items():
@@ -562,6 +572,346 @@ class RemoteProviderModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.object, "chat.completion")
         self.assertEqual(resp.choices[0].message, {"role": "assistant", "content": "local ok"})
 
+    async def test_local_gemma_4_openai_alias_maps_to_chat_openai(self):
+        calls = []
+
+        async def fake_ready():
+            return True
+
+        async def fake_local_request(method, path, **kwargs):
+            calls.append({"method": method, "path": path, **kwargs})
+            return httpx.Response(
+                200,
+                json={
+                    "id": "cmpl_local",
+                    "object": "chat.completion",
+                    "choices": [{"message": {"role": "assistant", "content": "gemma ok"}, "finish_reason": "stop"}],
+                },
+                request=httpx.Request(method, "http://local/chat_openai"),
+            )
+
+        self.adapter._ensure_local_ready = fake_ready
+        self.adapter._local_request_once_with_runtime_fallback = fake_local_request
+        req = types.SimpleNamespace(
+            model="local-gemma-4",
+            messages=[_Message("system", "Sois bref"), _Message("user", "Bonjour")],
+            temperature=0.3,
+            max_tokens=77,
+            max_completion_tokens=None,
+            stream=False,
+            metadata={"conversation_id": "should_not_forward", "rag": True, "memory_id": "nope"},
+            response_format=None,
+        )
+
+        resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+        payload = calls[-1]["json"]
+
+        self.assertEqual(resp["choices"][0]["message"]["content"], "gemma ok")
+        self.assertEqual(calls[-1]["path"], "/chat_openai")
+        self.assertEqual(payload["model"], "Gemma_4_12B_It_Q4_K_M")
+        self.assertEqual(payload["messages"], [{"role": "system", "content": "Sois bref"}, {"role": "user", "content": "Bonjour"}])
+        self.assertEqual(payload["temperature"], 0.3)
+        self.assertEqual(payload["max_tokens"], 77)
+        self.assertFalse(payload["stream"])
+        self.assertNotIn("conversation_id", payload)
+        self.assertNotIn("memory_id", payload)
+        self.assertNotIn("memory_append", payload)
+        self.assertNotIn("rag", payload)
+        self.assertNotIn("tools", payload)
+        self.assertNotIn("tool_choice", payload)
+        self.assertNotIn("parallel_tool_calls", payload)
+
+    async def test_local_mistral_openai_alias_maps_to_chat_openai(self):
+        calls = []
+
+        async def fake_ready():
+            return True
+
+        async def fake_local_request(method, path, **kwargs):
+            calls.append({"method": method, "path": path, **kwargs})
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"role": "assistant", "content": "mistral ok"}}]},
+                request=httpx.Request(method, "http://local/chat_openai"),
+            )
+
+        self.adapter._ensure_local_ready = fake_ready
+        self.adapter._local_request_once_with_runtime_fallback = fake_local_request
+        req = types.SimpleNamespace(
+            model="local-mistral-openai",
+            messages=[_Message("user", "Bonjour")],
+            temperature=0.2,
+            stream=False,
+            metadata={},
+            response_format=None,
+        )
+
+        resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+        payload = calls[-1]["json"]
+
+        self.assertEqual(resp["choices"][0]["message"]["content"], "mistral ok")
+        self.assertEqual(calls[-1]["path"], "/chat_openai")
+        self.assertEqual(payload["model"], "Mistral_7B")
+
+    async def test_local_openai_alias_forwards_response_format_without_adapter_validation(self):
+        calls = []
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+
+        async def fake_ready():
+            return True
+
+        async def fake_local_request(method, path, **kwargs):
+            calls.append({"method": method, "path": path, **kwargs})
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"role": "assistant", "content": '{"answer":"Rennes"}'}}], "parsed": {"answer": "Rennes"}},
+                request=httpx.Request(method, "http://local/chat_openai"),
+            )
+
+        self.adapter._ensure_local_ready = fake_ready
+        self.adapter._local_request_once_with_runtime_fallback = fake_local_request
+        req = types.SimpleNamespace(
+            model="local-gemma-4",
+            messages=[_Message("user", "Capitale ?")],
+            temperature=None,
+            stream=False,
+            metadata={},
+            response_format=response_format,
+        )
+
+        resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+        payload = calls[-1]["json"]
+
+        self.assertEqual(resp["parsed"], {"answer": "Rennes"})
+        self.assertEqual(payload["response_format"], response_format)
+
+    async def test_local_openai_alias_forwards_tool_calling_fields_to_chat_openai(self):
+        calls = []
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web",
+                "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+            },
+        }]
+        tool_calls = [{
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "web_search", "arguments": '{"query":"Rennes"}'},
+        }]
+
+        async def fake_ready():
+            return True
+
+        async def fake_local_request(method, path, **kwargs):
+            calls.append({"method": method, "path": path, **kwargs})
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]},
+                request=httpx.Request(method, "http://local/chat_openai"),
+            )
+
+        self.adapter._ensure_local_ready = fake_ready
+        self.adapter._local_request_once_with_runtime_fallback = fake_local_request
+        req = types.SimpleNamespace(
+            model="local-gemma-4",
+            messages=[
+                _Message("user", "Cherche Rennes"),
+                _Message("assistant", None, tool_calls=tool_calls),
+                _Message("tool", "Rennes est mentionnee", tool_call_id="call_1", name="web_search"),
+            ],
+            temperature=None,
+            max_tokens=None,
+            max_completion_tokens=None,
+            stream=False,
+            metadata={},
+            response_format=None,
+            tools=tools,
+            tool_choice={"type": "function", "function": {"name": "web_search"}},
+            parallel_tool_calls=False,
+        )
+
+        await self.adapter.chat_completions(req, _Request(), authorization=None)
+        payload = calls[-1]["json"]
+
+        self.assertEqual(payload["tools"], tools)
+        self.assertEqual(payload["tool_choice"], {"type": "function", "function": {"name": "web_search"}})
+        self.assertFalse(payload["parallel_tool_calls"])
+        self.assertEqual(payload["messages"][1]["tool_calls"], tool_calls)
+        self.assertIsNone(payload["messages"][1]["content"])
+        self.assertEqual(payload["messages"][2]["role"], "tool")
+        self.assertEqual(payload["messages"][2]["tool_call_id"], "call_1")
+        self.assertEqual(payload["messages"][2]["name"], "web_search")
+
+    async def test_local_openai_alias_stream_forwards_tool_calling_fields_to_chat_openai(self):
+        async def fake_ready():
+            return True
+
+        self.adapter._ensure_local_ready = fake_ready
+        FakeAsyncClient.stream_outcomes = [FakeStreamResponse(lines=["data: [DONE]"])]
+        tools = [{"type": "function", "function": {"name": "web_search", "parameters": {"type": "object"}}}]
+        req = types.SimpleNamespace(
+            model="local-gemma-4",
+            messages=[_Message("user", "Cherche Rennes")],
+            temperature=None,
+            max_tokens=None,
+            max_completion_tokens=None,
+            stream=True,
+            metadata={},
+            response_format=None,
+            tools=tools,
+            tool_choice="auto",
+            parallel_tool_calls=True,
+        )
+
+        resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+        await _collect_stream(resp)
+        payload = FakeAsyncClient.instances[-1].stream_calls[-1]["json"]
+
+        self.assertEqual(payload["tools"], tools)
+        self.assertEqual(payload["tool_choice"], "auto")
+        self.assertTrue(payload["parallel_tool_calls"])
+    async def test_local_openai_alias_stream_true_without_response_format_relays_native_sse(self):
+        async def fake_ready():
+            return True
+
+        self.adapter._ensure_local_ready = fake_ready
+        FakeAsyncClient.stream_outcomes = [FakeStreamResponse(lines=[
+            'data: {"choices":[{"delta":{"content":"hel"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"content":"lo"},"finish_reason":null}]}',
+            'data: [DONE]',
+        ])]
+        req = types.SimpleNamespace(
+            model="local-gemma-4",
+            messages=[_Message("user", "Bonjour")],
+            temperature=0.4,
+            max_tokens=12,
+            stream=True,
+            metadata={},
+            response_format=None,
+        )
+
+        resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+        raw = await _collect_stream(resp)
+        payload = FakeAsyncClient.instances[-1].stream_calls[-1]["json"]
+
+        self.assertEqual(resp.media_type, "text/event-stream")
+        self.assertIn('data: {"choices":[{"delta":{"content":"hel"},"finish_reason":null}]}', raw)
+        self.assertIn("data: [DONE]", raw)
+        self.assertEqual(payload["model"], "Gemma_4_12B_It_Q4_K_M")
+        self.assertTrue(payload["stream"])
+        self.assertEqual(payload["max_tokens"], 12)
+        self.assertNotIn("conversation_id", payload)
+        self.assertNotIn("memory_id", payload)
+
+    async def test_local_openai_alias_stream_true_with_response_format_synthesizes_sse_from_validated_final(self):
+        calls = []
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+
+        async def fake_ready():
+            return True
+
+        async def fake_local_request(method, path, **kwargs):
+            calls.append({"method": method, "path": path, **kwargs})
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"role": "assistant", "content": '{"answer":"Rennes"}'}}], "parsed": {"answer": "Rennes"}},
+                request=httpx.Request(method, "http://local/chat_openai"),
+            )
+
+        self.adapter._ensure_local_ready = fake_ready
+        self.adapter._local_request_once_with_runtime_fallback = fake_local_request
+        req = types.SimpleNamespace(
+            model="local-gemma-4",
+            messages=[_Message("user", "Capitale ?")],
+            temperature=None,
+            stream=True,
+            metadata={"conversation_id": "ignored"},
+            response_format=response_format,
+        )
+
+        resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+        events = _parse_chat_sse_data(await _collect_stream(resp))
+        content_chunks = [e["choices"][0]["delta"].get("content") for e in events if isinstance(e, dict) and e["choices"][0]["delta"].get("content")]
+        payload = calls[-1]["json"]
+
+        self.assertEqual(resp.media_type, "text/event-stream")
+        self.assertEqual(content_chunks, ['{"answer":"Rennes"}'])
+        self.assertEqual(json.loads(content_chunks[0]), {"answer": "Rennes"})
+        self.assertEqual(events[-2]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(events[-1], "[DONE]")
+        self.assertFalse(payload["stream"])
+        self.assertEqual(payload["response_format"], response_format)
+        self.assertNotIn("conversation_id", payload)
+        self.assertNotIn("memory_id", payload)
+
+    async def test_existing_local_alias_still_uses_legacy_local_chat(self):
+        calls = []
+
+        async def fake_local_chat(prompt, route_hint=None, temperature=None, meta=None, **kwargs):
+            calls.append({"prompt": prompt, "route_hint": route_hint, "temperature": temperature, "meta": meta, "kwargs": kwargs})
+            return "legacy ok"
+
+        self.adapter._local_chat = fake_local_chat
+        req = types.SimpleNamespace(
+            model="local-mistral",
+            messages=[_Message("user", "Bonjour")],
+            temperature=0.5,
+            stream=False,
+            metadata={},
+            response_format=None,
+        )
+
+        resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+
+        self.assertEqual(resp.choices[0].message["content"], "legacy ok")
+        self.assertEqual(calls[-1]["route_hint"], "local-mistral")
+
+    async def test_business_rag_alias_still_uses_legacy_local_chat(self):
+        calls = []
+
+        async def fake_local_chat(prompt, route_hint=None, temperature=None, meta=None, **kwargs):
+            calls.append({"prompt": prompt, "route_hint": route_hint, "meta": meta, "kwargs": kwargs})
+            return "rag ok"
+
+        self.adapter._local_chat = fake_local_chat
+        req = types.SimpleNamespace(
+            model="annoter_rag_vecteur",
+            messages=[_Message("user", "Cherche dans les docs")],
+            temperature=None,
+            stream=False,
+            metadata={"collection": "docs"},
+            response_format=None,
+        )
+
+        resp = await self.adapter.chat_completions(req, _Request(), authorization=None)
+
+        self.assertEqual(resp.choices[0].message["content"], "rag ok")
+        self.assertEqual(calls[-1]["route_hint"], "annoter_rag_vecteur")
+        self.assertEqual(calls[-1]["meta"].get("collection"), "docs")
     async def test_chat_completions_non_stream_response_format_json_schema_still_forwarded(self):
         response_format = {
             "type": "json_schema",
