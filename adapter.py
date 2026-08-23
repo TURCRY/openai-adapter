@@ -380,12 +380,10 @@ LOCAL_MODELS = [m.strip() for m in os.getenv("LOCAL_MODELS", "").split(",") if m
 MODEL_ALIAS = {
     # LLMs
     "local-mistral": "Mistral_7B",
-    "local-mistral-openai": "Mistral_7B",
     "local-gpt-oss_20B": "GPT_OSS_20B_4BIT",
     "local-llama3": "LLaMA_3_8B",
     "local-llama2": "LLaMA_2_7B",
     "local-gemma": "Gemma_7B",
-    "local-gemma-4": "Gemma_4_12B_It_Q4_K_M",
     "local-phi2": "Phi-2_7B",
     "local-Qwen_2_5_0_5B": "Qwen_2_5_0_5B",
     "local-Falcon3_10B": "Falcon3_10B",
@@ -412,10 +410,36 @@ MODEL_ALIAS = {
 }
 
 
-LOCAL_OPENAI_CHAT_ALIASES = {
-    "local-gemma-4",
-    "local-mistral-openai",
+DEFAULT_LOCAL_OPENAI_CHAT_MODELS = {
+    "local-gemma-4": "Gemma_4_12B_It_Q4_K_M",
+    "local-mistral-openai": "Mistral_7B",
 }
+
+
+def _parse_local_openai_chat_models(raw: str | None) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        alias, sep, real_model = item.partition("=")
+        alias = alias.strip()
+        real_model = real_model.strip()
+        if sep and alias and real_model:
+            aliases[alias] = real_model
+        else:
+            log.warning("LOCAL_OPENAI_CHAT_MODELS: entrée ignorée=%r format attendu alias=model", item)
+    return aliases
+
+
+def _load_local_openai_chat_models() -> dict[str, str]:
+    configured = _parse_local_openai_chat_models(os.getenv("LOCAL_OPENAI_CHAT_MODELS", ""))
+    return configured or dict(DEFAULT_LOCAL_OPENAI_CHAT_MODELS)
+
+
+LOCAL_OPENAI_CHAT_MODELS = _load_local_openai_chat_models()
+MODEL_ALIAS.update(LOCAL_OPENAI_CHAT_MODELS)
+LOCAL_OPENAI_CHAT_ALIASES = set(LOCAL_OPENAI_CHAT_MODELS)
 
 
 SENSITIVE_LOCAL_ONLY = {"annoter_rag"}

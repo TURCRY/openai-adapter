@@ -321,9 +321,13 @@ class RemoteProviderModelTests(unittest.IsolatedAsyncioTestCase):
         self.old_local_request_once = adapter._local_request_once_with_runtime_fallback
         self.old_adapter_api_key = adapter.ADAPTER_API_KEY
         self.old_local_models = list(adapter.LOCAL_MODELS)
+        self.old_model_alias = dict(adapter.MODEL_ALIAS)
+        self.old_local_openai_chat_models = dict(adapter.LOCAL_OPENAI_CHAT_MODELS)
+        self.old_local_openai_chat_aliases = set(adapter.LOCAL_OPENAI_CHAT_ALIASES)
         self.old_env = {
             "DEEPSEEK_API_KEY": os.environ.get("DEEPSEEK_API_KEY"),
             "PLAIN_API_KEY": os.environ.get("PLAIN_API_KEY"),
+            "LOCAL_OPENAI_CHAT_MODELS": os.environ.get("LOCAL_OPENAI_CHAT_MODELS"),
         }
         os.environ["DEEPSEEK_API_KEY"] = "deepseek-test-key"
         os.environ["PLAIN_API_KEY"] = "plain-test-key"
@@ -333,6 +337,9 @@ class RemoteProviderModelTests(unittest.IsolatedAsyncioTestCase):
         adapter.httpx.AsyncClient = FakeAsyncClient
         adapter.ADAPTER_API_KEY = ""
         adapter.LOCAL_MODELS = ["local-test-model"]
+        adapter.LOCAL_OPENAI_CHAT_MODELS = dict(adapter.DEFAULT_LOCAL_OPENAI_CHAT_MODELS)
+        adapter.LOCAL_OPENAI_CHAT_ALIASES = set(adapter.LOCAL_OPENAI_CHAT_MODELS)
+        adapter.MODEL_ALIAS.update(adapter.LOCAL_OPENAI_CHAT_MODELS)
         adapter._REMOTE_CONF = {
             "defaults": {
                 "base_url": "https://api.openai.com/v1",
@@ -387,12 +394,55 @@ class RemoteProviderModelTests(unittest.IsolatedAsyncioTestCase):
         adapter._local_request_once_with_runtime_fallback = self.old_local_request_once
         adapter.ADAPTER_API_KEY = self.old_adapter_api_key
         adapter.LOCAL_MODELS = self.old_local_models
+        adapter.MODEL_ALIAS = self.old_model_alias
+        adapter.LOCAL_OPENAI_CHAT_MODELS = self.old_local_openai_chat_models
+        adapter.LOCAL_OPENAI_CHAT_ALIASES = self.old_local_openai_chat_aliases
         for key, value in self.old_env.items():
             if value is None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
         _remove_stubs()
+
+    def test_parse_local_openai_chat_models_reads_current_env_format(self):
+        raw = "local-gemma-4=Gemma_4_12B_It_Q4_K_M,local-mistral-openai=Mistral_7B"
+
+        parsed = self.adapter._parse_local_openai_chat_models(raw)
+
+        self.assertEqual(parsed, {
+            "local-gemma-4": "Gemma_4_12B_It_Q4_K_M",
+            "local-mistral-openai": "Mistral_7B",
+        })
+
+    def test_load_local_openai_chat_models_uses_env_override(self):
+        old = os.environ.get("LOCAL_OPENAI_CHAT_MODELS")
+        os.environ["LOCAL_OPENAI_CHAT_MODELS"] = "custom-openai=Custom_Model"
+        try:
+            loaded = self.adapter._load_local_openai_chat_models()
+        finally:
+            if old is None:
+                os.environ.pop("LOCAL_OPENAI_CHAT_MODELS", None)
+            else:
+                os.environ["LOCAL_OPENAI_CHAT_MODELS"] = old
+
+        self.assertEqual(loaded, {"custom-openai": "Custom_Model"})
+
+    def test_load_local_openai_chat_models_falls_back_when_env_absent(self):
+        old = os.environ.pop("LOCAL_OPENAI_CHAT_MODELS", None)
+        try:
+            loaded = self.adapter._load_local_openai_chat_models()
+        finally:
+            if old is not None:
+                os.environ["LOCAL_OPENAI_CHAT_MODELS"] = old
+
+        self.assertEqual(loaded, self.adapter.DEFAULT_LOCAL_OPENAI_CHAT_MODELS)
+
+    def test_default_local_openai_chat_model_mapping_keeps_gemma4_and_mistral(self):
+        self.assertEqual(self.adapter.LOCAL_OPENAI_CHAT_MODELS["local-gemma-4"], "Gemma_4_12B_It_Q4_K_M")
+        self.assertEqual(self.adapter.LOCAL_OPENAI_CHAT_MODELS["local-mistral-openai"], "Mistral_7B")
+        self.assertIn("local-gemma-4", self.adapter.LOCAL_OPENAI_CHAT_ALIASES)
+        self.assertIn("local-mistral-openai", self.adapter.LOCAL_OPENAI_CHAT_ALIASES)
+        self.assertNotIn("local-mistral", self.adapter.LOCAL_OPENAI_CHAT_ALIASES)
 
     async def test_deepseek_provider_model_is_sent_to_remote_payload(self):
         await self.adapter._remote_chat(
