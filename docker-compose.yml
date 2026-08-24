@@ -19,8 +19,9 @@ services:
     # Monte limiter.toml quand tu activeras le limiter (facultatif pour l’instant)
     #    - /volume1/home/nicolas/Docker/searxng/limiter.toml:/etc/searxng/limiter.toml:ro
     ports:
-      - "192.168.1.20:8080:8080"      # LAN
-      - "10.0.1.1:8080:8080"          # VPN
+      - "18081:8080"
+      # - "192.168.1.20:8080:8080"      # LAN
+      # - "10.0.1.1:8080:8080"          # VPN
     depends_on:
       - redis
     healthcheck:
