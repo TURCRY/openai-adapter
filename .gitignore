@@ -7,5 +7,6 @@ __pycache__/
 Thumbs.db
 .DS_Store
 
-~$*tools/perplexica/output/
+~$*
+tools/perplexica/output/
 tools/perplexica/perplexica_chat_*.json
