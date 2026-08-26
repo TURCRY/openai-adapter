@@ -2,7 +2,7 @@
 """Send a built Perplexica email through generic SMTP.
 
 No cron, no SMTP secret storage, and no hard-coded recipient. Configuration comes
-from environment variables or CLI arguments.
+from environment variables, an optional .env file, or CLI arguments.
 """
 
 from __future__ import annotations
@@ -25,9 +25,12 @@ ENV_SMTP_USERNAME = "PERPLEXICA_SMTP_USERNAME"
 ENV_SMTP_PASSWORD = "PERPLEXICA_SMTP_PASSWORD"
 ENV_MAIL_FROM = "PERPLEXICA_MAIL_FROM"
 ENV_MAIL_TO = "PERPLEXICA_MAIL_TO"
+ENV_SMTP_SECURITY = "PERPLEXICA_SMTP_SECURITY"
 ENV_SMTP_STARTTLS = "PERPLEXICA_SMTP_STARTTLS"
 DEFAULT_SMTP_PORT = 587
 DEFAULT_TIMEOUT_SECONDS = 30
+DEFAULT_ENV_FILE = Path(__file__).resolve().parent / ".env"
+SMTP_SECURITY_VALUES = {"ssl", "starttls", "none"}
 
 
 class MailSendError(Exception):
@@ -42,7 +45,7 @@ class SMTPConfig:
     password: str | None = None
     from_address: str = ""
     to_address: str = ""
-    starttls: bool = True
+    security: str = "starttls"
     timeout: int = DEFAULT_TIMEOUT_SECONDS
 
     @property
@@ -73,26 +76,81 @@ def parse_port(value: str | int | None) -> int:
     return port
 
 
+def parse_security(value: str | None, port: int, legacy_starttls: str | None = None) -> str:
+    if value is not None and value != "":
+        security = value.strip().lower()
+        if security not in SMTP_SECURITY_VALUES:
+            raise MailSendError(f"Invalid SMTP security value: {value!r}. Use ssl, starttls, or none.")
+        return security
+
+    if legacy_starttls is not None and legacy_starttls != "":
+        return "starttls" if parse_bool(legacy_starttls) else "none"
+
+    return "ssl" if port == 465 else "starttls"
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise MailSendError(f"Cannot read env file: {path}") from exc
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def merged_config_values(args: argparse.Namespace) -> dict[str, str | None]:
+    env_file = args.env_file or DEFAULT_ENV_FILE
+    file_values = parse_env_file(env_file)
+
+    def pick(cli_value: str | None, env_key: str) -> str | None:
+        if cli_value is not None and cli_value != "":
+            return cli_value
+        if env_key in os.environ:
+            return os.environ.get(env_key)
+        return file_values.get(env_key)
+
+    return {
+        ENV_SMTP_HOST: pick(args.smtp_host, ENV_SMTP_HOST),
+        ENV_SMTP_PORT: pick(args.smtp_port, ENV_SMTP_PORT),
+        ENV_SMTP_USERNAME: pick(args.smtp_username, ENV_SMTP_USERNAME),
+        ENV_SMTP_PASSWORD: pick(args.smtp_password, ENV_SMTP_PASSWORD),
+        ENV_MAIL_FROM: pick(args.from_address, ENV_MAIL_FROM),
+        ENV_MAIL_TO: pick(args.to, ENV_MAIL_TO),
+        ENV_SMTP_SECURITY: pick(args.smtp_security, ENV_SMTP_SECURITY),
+        ENV_SMTP_STARTTLS: pick(args.smtp_starttls, ENV_SMTP_STARTTLS),
+    }
+
+
 def smtp_config_from_env_and_args(args: argparse.Namespace) -> SMTPConfig:
-    host = args.smtp_host or os.environ.get(ENV_SMTP_HOST)
-    from_address = args.from_address or os.environ.get(ENV_MAIL_FROM)
-    to_address = args.to or os.environ.get(ENV_MAIL_TO)
-    username = args.smtp_username or os.environ.get(ENV_SMTP_USERNAME)
-    password = args.smtp_password or os.environ.get(ENV_SMTP_PASSWORD)
-    port = parse_port(args.smtp_port or os.environ.get(ENV_SMTP_PORT))
-    starttls = parse_bool(
-        args.smtp_starttls if args.smtp_starttls is not None else os.environ.get(ENV_SMTP_STARTTLS),
-        default=True,
-    )
+    values = merged_config_values(args)
+    port = parse_port(values[ENV_SMTP_PORT])
+    security = parse_security(values[ENV_SMTP_SECURITY], port, values[ENV_SMTP_STARTTLS])
 
     config = SMTPConfig(
-        host=host or "",
+        host=values[ENV_SMTP_HOST] or "",
         port=port,
-        username=username or None,
-        password=password or None,
-        from_address=from_address or "",
-        to_address=to_address or "",
-        starttls=starttls,
+        username=values[ENV_SMTP_USERNAME] or None,
+        password=values[ENV_SMTP_PASSWORD] or None,
+        from_address=values[ENV_MAIL_FROM] or "",
+        to_address=values[ENV_MAIL_TO] or "",
+        security=security,
         timeout=args.timeout,
     )
     validate_smtp_config(config)
@@ -106,6 +164,8 @@ def validate_smtp_config(config: SMTPConfig) -> None:
         raise MailSendError(f"Missing From address. Set {ENV_MAIL_FROM} or use --from-address.")
     if not config.recipients:
         raise MailSendError(f"Missing To address. Set {ENV_MAIL_TO} or use --to.")
+    if config.security not in SMTP_SECURITY_VALUES:
+        raise MailSendError("SMTP security must be one of: ssl, starttls, none.")
     if (config.username and not config.password) or (config.password and not config.username):
         raise MailSendError("SMTP username and password must be provided together.")
     if config.timeout <= 0:
@@ -179,7 +239,7 @@ def send_mail(mail: dict[str, Any], smtp_config: SMTPConfig, dry_run: bool = Fal
         "message_id": message["Message-ID"],
         "smtp_host": smtp_config.host,
         "smtp_port": smtp_config.port,
-        "starttls": smtp_config.starttls,
+        "security": smtp_config.security,
         "recipients": smtp_config.recipients,
         "subject": message["Subject"],
         "text_size": len(text_payload.encode("utf-8")),
@@ -191,8 +251,13 @@ def send_mail(mail: dict[str, Any], smtp_config: SMTPConfig, dry_run: bool = Fal
         return result
 
     try:
-        with smtplib.SMTP(smtp_config.host, smtp_config.port, timeout=smtp_config.timeout) as smtp:
-            if smtp_config.starttls:
+        if smtp_config.security == "ssl":
+            smtp_factory = smtplib.SMTP_SSL
+        else:
+            smtp_factory = smtplib.SMTP
+
+        with smtp_factory(smtp_config.host, smtp_config.port, timeout=smtp_config.timeout) as smtp:
+            if smtp_config.security == "starttls":
                 smtp.starttls()
             if smtp_config.username and smtp_config.password:
                 smtp.login(smtp_config.username, smtp_config.password)
@@ -208,12 +273,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Send or dry-run a built Perplexica email via SMTP.")
     parser.add_argument("mail_json", type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE)
     parser.add_argument("--smtp-host", help=f"SMTP host. Overrides {ENV_SMTP_HOST}.")
     parser.add_argument("--smtp-port", help=f"SMTP port. Overrides {ENV_SMTP_PORT}.")
     parser.add_argument("--smtp-username", help=f"SMTP username. Overrides {ENV_SMTP_USERNAME}.")
     parser.add_argument("--smtp-password", help=f"SMTP password. Overrides {ENV_SMTP_PASSWORD}.")
     parser.add_argument("--from-address", help=f"From address. Overrides {ENV_MAIL_FROM}.")
     parser.add_argument("--to", help=f"Recipient address, comma-separated. Overrides {ENV_MAIL_TO}.")
+    parser.add_argument("--smtp-security", choices=sorted(SMTP_SECURITY_VALUES), help=f"Overrides {ENV_SMTP_SECURITY}.")
     parser.add_argument("--smtp-starttls", choices=["true", "false", "1", "0", "yes", "no"])
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     return parser
@@ -231,6 +298,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"from: {config.from_address}")
         print(f"to: {', '.join(result['recipients'])}")
         print(f"smtp_host: {result['smtp_host']}")
+        print(f"smtp_port: {result['smtp_port']}")
+        print(f"security: {result['security']}")
         print(f"text_size: {result['text_size']}")
         print(f"html_size: {result['html_size']}")
         print(f"message_id: {result['message_id']}")
