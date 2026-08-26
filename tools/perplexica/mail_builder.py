@@ -18,6 +18,7 @@ from typing import Any
 
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "output" / "mail"
+BRAND_TITLE = "Veille Perplexica"
 INLINE_RE = re.compile(
     r"\[([^\]]+)\]\(([^)]+)\)|"
     r"\[([1-9]\d*(?:\s*,\s*[1-9]\d*)*)\]|"
@@ -75,15 +76,19 @@ def render_citation_html(raw_numbers: str, sources_by_index: dict[int, dict[str,
         label = f"[{number_text}]"
         source = sources_by_index.get(number)
         url = source.get("url") if isinstance(source, dict) else None
+        style = (
+            "font-size:11px;line-height:1;color:#4f6f9f;text-decoration:none;"
+            "vertical-align:super;margin-left:2px;white-space:nowrap;"
+        )
         if isinstance(url, str) and url:
             rendered.append(
-                '<a class="citation" href="{}">{}</a>'.format(
-                    html.escape(url, quote=True), html.escape(label)
+                '<a href="{}" style="{}">{}</a>'.format(
+                    html.escape(url, quote=True), style, html.escape(label)
                 )
             )
         else:
-            rendered.append(html.escape(label))
-    return "".join(rendered)
+            rendered.append(f'<span style="{style}color:#6b7280;">{html.escape(label)}</span>')
+    return "<span style=\"white-space:nowrap;\">" + "".join(rendered) + "</span>"
 
 
 def render_inline_html(text: str, sources_by_index: dict[int, dict[str, Any]]) -> str:
@@ -94,7 +99,7 @@ def render_inline_html(text: str, sources_by_index: dict[int, dict[str, Any]]) -
         link_text, link_url, citation_numbers, bold_text, italic_text = match.groups()
         if link_text is not None and link_url is not None:
             output.append(
-                '<a href="{}">{}</a>'.format(
+                '<a href="{}" style="color:#2454a6;text-decoration:underline;">{}</a>'.format(
                     html.escape(link_url, quote=True),
                     render_inline_html(link_text, sources_by_index),
                 )
@@ -120,7 +125,10 @@ def markdown_to_html(markdown: str, sources_by_index: dict[int, dict[str, Any]])
         nonlocal paragraph
         if paragraph:
             text = " ".join(line.strip() for line in paragraph if line.strip())
-            parts.append(f"<p>{render_inline_html(text, sources_by_index)}</p>")
+            parts.append(
+                '<p style="margin:0 0 14px 0;font-size:15px;line-height:1.58;color:#1f2933;">'
+                f"{render_inline_html(text, sources_by_index)}</p>"
+            )
             paragraph = []
 
     def close_list() -> None:
@@ -140,16 +148,24 @@ def markdown_to_html(markdown: str, sources_by_index: dict[int, dict[str, Any]])
             flush_paragraph()
             close_list()
             level = len(heading.group(1))
-            parts.append(f"<h{level}>{render_inline_html(heading.group(2), sources_by_index)}</h{level}>")
+            size = "18px" if level == 1 else "16px"
+            margin_top = "20px" if parts else "0"
+            parts.append(
+                f'<h2 style="margin:{margin_top} 0 8px 0;font-size:{size};line-height:1.35;'
+                f'font-weight:700;color:#172033;">{render_inline_html(heading.group(2), sources_by_index)}</h2>'
+            )
             continue
 
         bullet = BULLET_RE.match(line)
         if bullet:
             flush_paragraph()
             if not in_list:
-                parts.append("<ul>")
+                parts.append('<ul style="margin:0 0 14px 20px;padding:0;color:#1f2933;">')
                 in_list = True
-            parts.append(f"<li>{render_inline_html(bullet.group(1), sources_by_index)}</li>")
+            parts.append(
+                '<li style="margin:0 0 7px 0;font-size:15px;line-height:1.55;color:#1f2933;">'
+                f"{render_inline_html(bullet.group(1), sources_by_index)}</li>"
+            )
             continue
 
         close_list()
@@ -170,7 +186,9 @@ def markdown_to_text(markdown: str) -> str:
 
 def make_subject(question: str, subject: str | None = None) -> str:
     clean = " ".join((subject or question or "Conversation Perplexica").split())
-    return f"[Perplexica] {clean}"
+    if subject:
+        return clean
+    return f"{BRAND_TITLE} — {clean}"
 
 
 def cited_sources(canonical_result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -188,6 +206,68 @@ def validate_canonical_result(canonical_result: dict[str, Any]) -> None:
         raise MailBuildError("Canonical result is missing string field 'question'.")
     if not isinstance(canonical_result.get("answer_markdown"), str):
         raise MailBuildError("Canonical result is missing string field 'answer_markdown'.")
+
+
+def build_html_body(
+    mail_subject: str,
+    question: str,
+    generated_at: str,
+    answer_html: str,
+    html_sources: list[str],
+    footer: str,
+) -> str:
+    source_rows = "".join(html_sources) or (
+        '<tr><td style="padding:0 0 10px 0;font-size:14px;line-height:1.5;color:#4b5563;">'
+        "Aucune source citée.</td></tr>"
+    )
+    return f"""<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>{html.escape(mail_subject)}</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f5f7;font-family:Arial,'Segoe UI',sans-serif;color:#1f2933;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f3f5f7;margin:0;padding:24px 0;">
+    <tr>
+      <td align="center" style="padding:0 12px;">
+        <table role="presentation" width="760" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:760px;background:#ffffff;border:1px solid #e2e8f0;">
+          <tr>
+            <td style="padding:26px 30px 18px 30px;border-bottom:1px solid #e5e7eb;">
+              <div style="font-size:13px;line-height:1.4;font-weight:700;color:#2454a6;text-transform:uppercase;">{BRAND_TITLE}</div>
+              <div style="margin-top:5px;font-size:12px;line-height:1.4;color:#6b7280;">Date de génération : {html.escape(generated_at)}</div>
+              <h1 style="margin:18px 0 0 0;font-size:24px;line-height:1.28;font-weight:700;color:#111827;">{html.escape(question)}</h1>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:26px 30px 8px 30px;">
+              {answer_html}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 30px 0 30px;">
+              <div style="border-top:1px solid #e5e7eb;font-size:1px;line-height:1px;">&nbsp;</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:22px 30px 8px 30px;">
+              <h2 style="margin:0 0 14px 0;font-size:18px;line-height:1.35;font-weight:700;color:#172033;">Sources principales</h2>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                {source_rows}
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:14px 30px 26px 30px;">
+              <div style="font-size:12px;line-height:1.45;color:#6b7280;">{html.escape(footer)}</div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+"""
 
 
 def build_mail(canonical_result: dict[str, Any], subject: str | None = None) -> dict[str, Any]:
@@ -208,7 +288,10 @@ def build_mail(canonical_result: dict[str, Any], subject: str | None = None) -> 
         title = source.get("title") or "Source sans titre"
         url = source.get("url") or ""
         html_sources.append(
-            "<li><strong>[{}] {}</strong><br><a href=\"{}\">{}</a></li>".format(
+            '<tr><td style="padding:0 0 12px 0;font-size:14px;line-height:1.45;color:#1f2933;">'
+            '<div style="font-weight:700;color:#111827;">[{}] {}</div>'
+            '<div style="margin-top:2px;"><a href="{}" style="color:#2454a6;text-decoration:underline;word-break:break-all;">{}</a></div>'
+            "</td></tr>".format(
                 html.escape(str(index)),
                 html.escape(str(title)),
                 html.escape(str(url), quote=True),
@@ -219,48 +302,16 @@ def build_mail(canonical_result: dict[str, Any], subject: str | None = None) -> 
 
     all_source_count = len(canonical_result.get("all_sources", []) or [])
     cited_source_count = len(cited)
-    footer = f"Sources consultées : {all_source_count} — Sources citées : {cited_source_count}"
-
-    html_body = f"""<!doctype html>
-<html lang="fr">
-<head>
-  <meta charset="utf-8">
-  <title>{html.escape(mail_subject)}</title>
-  <style>
-    body {{ font-family: Arial, sans-serif; line-height: 1.55; color: #202124; }}
-    main {{ max-width: 760px; margin: 0 auto; }}
-    h1, h2, h3 {{ line-height: 1.25; }}
-    blockquote {{ border-left: 3px solid #d0d7de; margin-left: 0; padding-left: 1rem; color: #57606a; }}
-    .citation {{ font-size: 0.9em; text-decoration: none; margin-left: 0.12rem; }}
-    .meta {{ color: #57606a; font-size: 0.95em; }}
-    .sources li {{ margin-bottom: 0.75rem; }}
-  </style>
-</head>
-<body>
-<main>
-  <h1>{html.escape(mail_subject)}</h1>
-  <p class="meta">Date de génération : {html.escape(generated_at)}</p>
-  <h2>Question</h2>
-  <p>{html.escape(question)}</p>
-  <h2>Réponse</h2>
-  {answer_html}
-  <h2>Sources citées</h2>
-  <ol class="sources">
-    {' '.join(html_sources)}
-  </ol>
-  <p class="meta">{html.escape(footer)}</p>
-</main>
-</body>
-</html>
-"""
+    footer = f"{all_source_count} sources consultées · {cited_source_count} sources citées"
+    html_body = build_html_body(mail_subject, question, generated_at, answer_html, html_sources, footer)
 
     text_body = "\n\n".join(
         [
-            mail_subject,
-            f"Date de génération : {generated_at}",
-            "Question\n" + question,
-            "Réponse\n" + answer_text,
-            "Sources citées\n" + ("\n\n".join(text_sources) if text_sources else "Aucune source citée."),
+            BRAND_TITLE,
+            f"Date : {generated_at}",
+            "QUESTION\n" + question,
+            "SYNTHÈSE\n" + answer_text,
+            "SOURCES PRINCIPALES\n" + ("\n\n".join(text_sources) if text_sources else "Aucune source citée."),
             footer,
         ]
     )
@@ -311,7 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build HTML/text email content from a Perplexica JSON result.")
     parser.add_argument("input_json", type=Path)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--subject", help="Custom subject text without the [Perplexica] prefix.")
+    parser.add_argument("--subject", help="Custom subject text. When provided, it is used as-is.")
     return parser
 
 

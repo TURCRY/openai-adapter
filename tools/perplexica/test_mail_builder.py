@@ -16,7 +16,7 @@ class MailBuilderTests(unittest.TestCase):
             "all_sources": [
                 {
                     "index": 1,
-                    "title": "Paris — Wikipédia",
+                    "title": "Paris - Wikipedia",
                     "url": "https://example.com/paris",
                     "content": "full content excluded",
                     "cited": True,
@@ -24,7 +24,7 @@ class MailBuilderTests(unittest.TestCase):
                 },
                 {
                     "index": 2,
-                    "title": "Source non citée",
+                    "title": "Source non citee",
                     "url": "https://example.com/uncited",
                     "content": "must not appear",
                     "cited": False,
@@ -32,7 +32,7 @@ class MailBuilderTests(unittest.TestCase):
                 },
             ],
             "cited_sources": [
-                {"index": 1, "title": "Paris — Wikipédia", "url": "https://example.com/paris", "citation_count": 1}
+                {"index": 1, "title": "Paris - Wikipedia", "url": "https://example.com/paris", "citation_count": 1}
             ],
             "citation_numbers": [1],
             "unresolved_citations": [],
@@ -40,21 +40,43 @@ class MailBuilderTests(unittest.TestCase):
             "status": "completed",
         }
 
+    def test_default_subject_is_watch_note(self):
+        mail = build_mail(self.canonical())
+        self.assertEqual(mail["subject"], "Veille Perplexica — Quelle est la capitale de la France ?")
+
+    def test_custom_subject_is_used_as_is(self):
+        mail = build_mail(self.canonical(), subject="Sujet personnalise")
+        self.assertEqual(mail["subject"], "Sujet personnalise")
+
     def test_answer_simple(self):
         mail = build_mail(self.canonical())
         self.assertIn("Paris est la capitale", mail["text"])
         self.assertIn("Paris est la capitale", mail["html"])
 
+    def test_html_structure_is_professional_email_layout(self):
+        html = build_mail(self.canonical())["html"]
+        self.assertIn("Veille Perplexica", html)
+        self.assertIn("Date de génération", html)
+        self.assertIn("Sources principales", html)
+        self.assertIn('role="presentation"', html)
+        self.assertIn("max-width:760px", html)
+        self.assertIn("background:#f3f5f7", html)
+        self.assertIn("background:#ffffff", html)
+
     def test_markdown_headings_lists_bold_italic_and_links(self):
         result = self.canonical()
         result["answer_markdown"] = "# Titre\n\n## Section\n\n- **Fort**\n- *Italique*\n- [Lien](https://example.com)"
         html = build_mail(result)["html"]
-        self.assertIn("<h1>Titre</h1>", html)
-        self.assertIn("<h2>Section</h2>", html)
-        self.assertIn("<ul>", html)
+        self.assertNotIn("<h1>Titre</h1>", html)
+        self.assertIn("font-size:18px", html)
+        self.assertIn("font-size:16px", html)
+        self.assertIn("Titre", html)
+        self.assertIn("Section", html)
+        self.assertIn("<ul style=", html)
         self.assertIn("<strong>Fort</strong>", html)
         self.assertIn("<em>Italique</em>", html)
-        self.assertIn('<a href="https://example.com">Lien</a>', html)
+        self.assertIn('href="https://example.com"', html)
+        self.assertIn("text-decoration:underline", html)
 
     def test_citations_adjacent_preserve_real_indices(self):
         result = self.canonical()
@@ -73,6 +95,7 @@ class MailBuilderTests(unittest.TestCase):
         self.assertIn(">[1]</a>", html)
         self.assertIn(">[42]</a>", html)
         self.assertIn(">[59]</a>", html)
+        self.assertIn("vertical-align:super", html)
         self.assertIn("[42] B", html)
 
     def test_citations_comma_format(self):
@@ -85,15 +108,17 @@ class MailBuilderTests(unittest.TestCase):
         html = build_mail(result)["html"]
         self.assertIn('href="https://a"', html)
         self.assertIn('href="https://c"', html)
+        self.assertIn(">[1]</a>", html)
+        self.assertIn(">[3]</a>", html)
 
     def test_cited_source_is_rendered(self):
         mail = build_mail(self.canonical())
-        self.assertIn("[1] Paris — Wikipédia", mail["text"])
+        self.assertIn("[1] Paris - Wikipedia", mail["text"])
         self.assertIn("https://example.com/paris", mail["html"])
 
     def test_uncited_source_is_excluded_from_mail_sections(self):
         mail = build_mail(self.canonical())
-        self.assertNotIn("Source non citée", mail["text"])
+        self.assertNotIn("Source non citee", mail["text"])
         self.assertNotIn("https://example.com/uncited", mail["html"])
         self.assertNotIn("must not appear", mail["html"])
 
@@ -105,13 +130,16 @@ class MailBuilderTests(unittest.TestCase):
         html = build_mail(result)["html"]
         self.assertIn("[99]", html)
         self.assertNotIn('href="[99]"', html)
+        self.assertNotIn('href="https://example.com/99"', html)
 
     def test_french_utf8_characters(self):
         result = self.canonical()
         result["answer_markdown"] = "Réponse à propos d’Évreux et de l’été [1]."
+        result["cited_sources"][0]["title"] = "Paris — Wikipédia"
         mail = build_mail(result)
         self.assertIn("Évreux", mail["text"])
         self.assertIn("été", mail["html"])
+        self.assertIn("Paris — Wikipédia", mail["text"])
 
     def test_html_is_escaped(self):
         result = self.canonical()
@@ -124,6 +152,32 @@ class MailBuilderTests(unittest.TestCase):
         self.assertNotIn("<img src=x", html)
         self.assertIn("&lt;script&gt;", html)
         self.assertIn("&lt;b&gt;attaque&lt;/b&gt;", html)
+
+    def test_text_body_is_readable_watch_note(self):
+        text = build_mail(self.canonical())["text"]
+        self.assertIn("Veille Perplexica\n\nDate :", text)
+        self.assertIn("QUESTION\nQuelle est la capitale", text)
+        self.assertIn("SYNTHÈSE\nParis est la capitale [1].", text)
+        self.assertIn("SOURCES PRINCIPALES\n[1] Paris - Wikipedia", text)
+        self.assertIn("2 sources consultées · 1 sources citées", text)
+
+    def test_chat_and_message_ids_are_metadata_only(self):
+        mail = build_mail(self.canonical())
+        self.assertNotIn("chat123", mail["html"])
+        self.assertNotIn("msg123", mail["html"])
+        self.assertNotIn("chat123", mail["text"])
+        self.assertNotIn("msg123", mail["text"])
+        self.assertEqual(mail["metadata"]["chat_id"], "chat123")
+        self.assertEqual(mail["metadata"]["message_id"], "msg123")
+
+    def test_outlook_safe_html_stays_simple(self):
+        html = build_mail(self.canonical())["html"]
+        self.assertNotIn("<style", html.lower())
+        self.assertNotIn("<script", html.lower())
+        self.assertNotIn("<main", html.lower())
+        self.assertNotIn("class=", html.lower())
+        self.assertIn("<table", html.lower())
+        self.assertIn("style=", html.lower())
 
     def test_invalid_json_file(self):
         with tempfile.TemporaryDirectory() as tmp:
