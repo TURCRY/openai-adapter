@@ -270,10 +270,35 @@ def build_html_body(
 """
 
 
-def build_mail(canonical_result: dict[str, Any], subject: str | None = None) -> dict[str, Any]:
+def valid_editorial_payload(editorial: dict[str, Any] | None) -> bool:
+    return (
+        isinstance(editorial, dict)
+        and editorial.get("status") == "completed"
+        and isinstance(editorial.get("body_markdown"), str)
+        and bool(editorial.get("body_markdown", "").strip())
+    )
+
+
+def clean_display_title(display_title: str | None) -> str | None:
+    if not isinstance(display_title, str):
+        return None
+    clean = " ".join(display_title.split())
+    return clean or None
+
+
+def build_mail(
+    canonical_result: dict[str, Any],
+    subject: str | None = None,
+    editorial: dict[str, Any] | None = None,
+    display_title: str | None = None,
+) -> dict[str, Any]:
     validate_canonical_result(canonical_result)
+    use_editorial = valid_editorial_payload(editorial)
     question = canonical_result["question"]
-    answer_markdown = canonical_result["answer_markdown"]
+    configured_display_title = clean_display_title(display_title)
+    editorial_title = clean_display_title(editorial.get("title")) if use_editorial else None
+    visible_title = editorial_title or configured_display_title or question
+    answer_markdown = editorial["body_markdown"].strip() if use_editorial else canonical_result["answer_markdown"]
     sources_by_index = source_map(canonical_result)
     cited = cited_sources(canonical_result)
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -303,13 +328,13 @@ def build_mail(canonical_result: dict[str, Any], subject: str | None = None) -> 
     all_source_count = len(canonical_result.get("all_sources", []) or [])
     cited_source_count = len(cited)
     footer = f"{all_source_count} sources consultées · {cited_source_count} sources citées"
-    html_body = build_html_body(mail_subject, question, generated_at, answer_html, html_sources, footer)
+    html_body = build_html_body(mail_subject, visible_title, generated_at, answer_html, html_sources, footer)
 
     text_body = "\n\n".join(
         [
             BRAND_TITLE,
             f"Date : {generated_at}",
-            "QUESTION\n" + question,
+            "QUESTION\n" + visible_title,
             "SYNTHÈSE\n" + answer_text,
             "SOURCES PRINCIPALES\n" + ("\n\n".join(text_sources) if text_sources else "Aucune source citée."),
             footer,
@@ -322,11 +347,15 @@ def build_mail(canonical_result: dict[str, Any], subject: str | None = None) -> 
         "chat_id": canonical_result.get("chat_id"),
         "message_id": canonical_result.get("message_id"),
         "question": question,
+        "display_title": configured_display_title,
+        "visible_title": visible_title,
         "status": canonical_result.get("status"),
         "all_source_count": all_source_count,
         "cited_source_count": cited_source_count,
         "citation_numbers": canonical_result.get("citation_numbers", []),
         "unresolved_citations": canonical_result.get("unresolved_citations", []),
+        "editorial_used": use_editorial,
+        "editorial_model": editorial.get("model") if use_editorial else None,
     }
 
     return {

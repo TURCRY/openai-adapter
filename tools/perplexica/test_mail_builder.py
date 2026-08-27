@@ -48,6 +48,57 @@ class MailBuilderTests(unittest.TestCase):
         mail = build_mail(self.canonical(), subject="Sujet personnalise")
         self.assertEqual(mail["subject"], "Sujet personnalise")
 
+    def test_display_title_overrides_raw_visible_title(self):
+        result = self.canonical()
+        result["question"] = "Prompt complet ligne 1.\n\nConsignes longues internes."
+        title = "Veille hebdomadaire \u2014 Expertise de justice et m\u00e9diation"
+        mail = build_mail(result, subject="Objet SMTP", display_title=title)
+        self.assertIn(title, mail["text"])
+        self.assertIn(title, mail["html"])
+        self.assertNotIn("QUESTION\nPrompt complet ligne 1.", mail["text"])
+        self.assertEqual(mail["metadata"]["question"], result["question"])
+        self.assertEqual(result["question"], "Prompt complet ligne 1.\n\nConsignes longues internes.")
+
+    def test_without_display_title_keeps_historical_visible_question(self):
+        mail = build_mail(self.canonical())
+        self.assertIn("QUESTION\nQuelle est la capitale de la France ?", mail["text"])
+        self.assertIn("Quelle est la capitale de la France ?", mail["html"])
+        self.assertIsNone(mail["metadata"]["display_title"])
+
+    def test_editorial_title_has_priority_over_display_title(self):
+        editorial = {
+            "status": "completed",
+            "title": "Titre \u00e9ditorial prioritaire",
+            "body_markdown": "Synth\u00e8se [1].",
+            "model": "local-gemma-4",
+        }
+        mail = build_mail(self.canonical(), editorial=editorial, display_title="Titre job")
+        self.assertIn("QUESTION\nTitre \u00e9ditorial prioritaire", mail["text"])
+        self.assertIn("Titre \u00e9ditorial prioritaire", mail["html"])
+        self.assertNotIn("QUESTION\nTitre job", mail["text"])
+        self.assertEqual(mail["metadata"]["display_title"], "Titre job")
+        self.assertEqual(mail["metadata"]["visible_title"], "Titre \u00e9ditorial prioritaire")
+
+    def test_editorial_empty_title_falls_back_to_display_title(self):
+        editorial = {
+            "status": "completed",
+            "title": "  ",
+            "body_markdown": "Synth\u00e8se [1].",
+            "model": "local-gemma-4",
+        }
+        title = "Veille hebdomadaire \u2014 Expertise de justice et m\u00e9diation"
+        mail = build_mail(self.canonical(), editorial=editorial, display_title=title)
+        self.assertIn("QUESTION\n" + title, mail["text"])
+        self.assertIn(title, mail["html"])
+        self.assertTrue(mail["metadata"]["editorial_used"])
+
+    def test_display_title_utf8_is_preserved(self):
+        title = "Veille hebdomadaire \u2014 Expertise de justice et m\u00e9diation, \u0153uvre et l\u2019\u00e9t\u00e9"
+        mail = build_mail(self.canonical(), display_title=title)
+        self.assertEqual(mail["metadata"]["display_title"], title)
+        self.assertIn("\u0153uvre", mail["text"])
+        self.assertIn("l\u2019\u00e9t\u00e9", mail["html"])
+
     def test_answer_simple(self):
         mail = build_mail(self.canonical())
         self.assertIn("Paris est la capitale", mail["text"])

@@ -1,0 +1,40 @@
+{
+  "name": "veille_expertise_mediation",
+  "base_url": "https://perplexity.ntu-consult.com",
+  "send_mail": true,
+  "subject": "Veille expertise et médiation",
+  "display_title": "Veille hebdomadaire — Expertise de justice et médiation",
+  "mail_mode": "both",
+  "searches": [
+    {
+      "name": "expertise_justice",
+      "prompt_file": "../prompts/veille_expertise_justice.md"
+    },
+    {
+      "name": "expertise_construction",
+      "prompt_file": "../prompts/veille_expertise_construction.md"
+    },
+    {
+      "name": "mediation",
+      "prompt_file": "../prompts/veille_mediation.md"
+    },
+    {
+      "name": "mard_textes",
+      "prompt_file": "../prompts/veille_mard_textes.md"
+    },
+    {
+      "name": "jurisprudence",
+      "prompt_file": "../prompts/veille_jurisprudence.md"
+    },
+    {
+      "name": "institutionnelle",
+      "prompt_file": "../prompts/veille_institutionnelle.md"
+    }
+  ],
+  "editorial": {
+    "enabled": true,
+    "prompt_file": "../prompts/prompt_editorial_veille.md",
+    "model": "local-gemma-4",
+    "timeout": 600
+  }
+}
