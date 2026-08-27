@@ -1,4 +1,5 @@
 import argparse
+from email import policy
 import io
 import json
 import os
@@ -6,6 +7,7 @@ import smtplib
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from email.parser import BytesParser
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -72,6 +74,25 @@ class MailSenderTests(unittest.TestCase):
         message = build_email_message(self.sample_mail(), self.sample_config())
         self.assertIn("État français", message["Subject"])
         self.assertIn("accents", message.get_body(preferencelist=("plain",)).get_content())
+
+    def test_professional_subject_round_trips_after_bytes_serialization(self):
+        subjects = [
+            "Veille expertise et m\u00e9diation \u2014 Source Perplexica",
+            "Veille expertise et m\u00e9diation \u2014 Synth\u00e8se \u00e9ditoriale",
+            "\u00e9 \u00e8 \u00e0 \u0153 \u2014 \u2019",
+        ]
+        for subject in subjects:
+            with self.subTest(subject=subject):
+                mail = {
+                    "subject": subject,
+                    "text": "Texte avec accents \u00e9 \u00e0.",
+                    "html": "<p>Texte avec accents \u00e9 \u00e0.</p>",
+                    "metadata": {},
+                }
+                message = build_email_message(mail, self.sample_config())
+                self.assertEqual(message["Subject"], subject)
+                parsed = BytesParser(policy=policy.default).parsebytes(message.as_bytes())
+                self.assertEqual(parsed["Subject"], subject)
 
     def test_ssl_port_465_uses_smtp_ssl(self):
         smtp = MagicMock()
