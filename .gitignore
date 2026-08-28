@@ -11,3 +11,4 @@ Thumbs.db
 tools/perplexica/output/
 tools/perplexica/perplexica_chat_*.json
 tools/perplexica/.env
+_scratch/

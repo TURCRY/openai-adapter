@@ -15,6 +15,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "output" / "mail"
@@ -27,6 +28,8 @@ INLINE_RE = re.compile(
 )
 HEADING_RE = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
 BULLET_RE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
+TEXT_WRAP_STYLE = "white-space:normal;word-wrap:break-word;overflow-wrap:break-word;"
+URL_WRAP_STYLE = "word-break:break-word;word-wrap:break-word;overflow-wrap:anywhere;"
 
 
 class MailBuildError(Exception):
@@ -78,7 +81,7 @@ def render_citation_html(raw_numbers: str, sources_by_index: dict[int, dict[str,
         url = source.get("url") if isinstance(source, dict) else None
         style = (
             "font-size:11px;line-height:1;color:#4f6f9f;text-decoration:none;"
-            "vertical-align:super;margin-left:2px;white-space:nowrap;"
+            f"vertical-align:super;margin-left:2px;{TEXT_WRAP_STYLE}"
         )
         if isinstance(url, str) and url:
             rendered.append(
@@ -88,7 +91,7 @@ def render_citation_html(raw_numbers: str, sources_by_index: dict[int, dict[str,
             )
         else:
             rendered.append(f'<span style="{style}color:#6b7280;">{html.escape(label)}</span>')
-    return "<span style=\"white-space:nowrap;\">" + "".join(rendered) + "</span>"
+    return "<span>" + "".join(rendered) + "</span>"
 
 
 def render_inline_html(text: str, sources_by_index: dict[int, dict[str, Any]]) -> str:
@@ -99,7 +102,7 @@ def render_inline_html(text: str, sources_by_index: dict[int, dict[str, Any]]) -
         link_text, link_url, citation_numbers, bold_text, italic_text = match.groups()
         if link_text is not None and link_url is not None:
             output.append(
-                '<a href="{}" style="color:#2454a6;text-decoration:underline;">{}</a>'.format(
+                f'<a href="{{}}" style="color:#2454a6;text-decoration:underline;{TEXT_WRAP_STYLE}">{{}}</a>'.format(
                     html.escape(link_url, quote=True),
                     render_inline_html(link_text, sources_by_index),
                 )
@@ -126,7 +129,7 @@ def markdown_to_html(markdown: str, sources_by_index: dict[int, dict[str, Any]])
         if paragraph:
             text = " ".join(line.strip() for line in paragraph if line.strip())
             parts.append(
-                '<p style="margin:0 0 14px 0;font-size:15px;line-height:1.58;color:#1f2933;">'
+                f'<p style="margin:0 0 14px 0;font-size:15px;line-height:1.58;color:#1f2933;{TEXT_WRAP_STYLE}">'
                 f"{render_inline_html(text, sources_by_index)}</p>"
             )
             paragraph = []
@@ -152,7 +155,7 @@ def markdown_to_html(markdown: str, sources_by_index: dict[int, dict[str, Any]])
             margin_top = "20px" if parts else "0"
             parts.append(
                 f'<h2 style="margin:{margin_top} 0 8px 0;font-size:{size};line-height:1.35;'
-                f'font-weight:700;color:#172033;">{render_inline_html(heading.group(2), sources_by_index)}</h2>'
+                f'font-weight:700;color:#172033;{TEXT_WRAP_STYLE}">{render_inline_html(heading.group(2), sources_by_index)}</h2>'
             )
             continue
 
@@ -160,10 +163,10 @@ def markdown_to_html(markdown: str, sources_by_index: dict[int, dict[str, Any]])
         if bullet:
             flush_paragraph()
             if not in_list:
-                parts.append('<ul style="margin:0 0 14px 20px;padding:0;color:#1f2933;">')
+                parts.append(f'<ul style="margin:0 0 14px 20px;padding:0;color:#1f2933;{TEXT_WRAP_STYLE}">')
                 in_list = True
             parts.append(
-                '<li style="margin:0 0 7px 0;font-size:15px;line-height:1.55;color:#1f2933;">'
+                f'<li style="margin:0 0 7px 0;font-size:15px;line-height:1.55;color:#1f2933;{TEXT_WRAP_STYLE}">'
                 f"{render_inline_html(bullet.group(1), sources_by_index)}</li>"
             )
             continue
@@ -226,39 +229,39 @@ def build_html_body(
   <meta charset="utf-8">
   <title>{html.escape(mail_subject)}</title>
 </head>
-<body style="margin:0;padding:0;background:#f3f5f7;font-family:Arial,'Segoe UI',sans-serif;color:#1f2933;">
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f3f5f7;margin:0;padding:24px 0;">
+<body style="margin:0;padding:0;background:#f3f5f7;font-family:Arial,'Segoe UI',sans-serif;color:#1f2933;{TEXT_WRAP_STYLE}">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f3f5f7;margin:0;padding:24px 0;border-collapse:collapse;">
     <tr>
-      <td align="center" style="padding:0 12px;">
-        <table role="presentation" width="760" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:760px;background:#ffffff;border:1px solid #e2e8f0;">
+      <td align="center" style="padding:0 12px;{TEXT_WRAP_STYLE}">
+        <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="width:600px;border-collapse:collapse;background:#ffffff;border:1px solid #e2e8f0;">
           <tr>
-            <td style="padding:26px 30px 18px 30px;border-bottom:1px solid #e5e7eb;">
-              <div style="font-size:13px;line-height:1.4;font-weight:700;color:#2454a6;text-transform:uppercase;">{BRAND_TITLE}</div>
-              <div style="margin-top:5px;font-size:12px;line-height:1.4;color:#6b7280;">Date de génération : {html.escape(generated_at)}</div>
-              <h1 style="margin:18px 0 0 0;font-size:24px;line-height:1.28;font-weight:700;color:#111827;">{html.escape(question)}</h1>
+            <td width="100%" style="width:100%;padding:26px 30px 18px 30px;border-bottom:1px solid #e5e7eb;{TEXT_WRAP_STYLE}">
+              <div style="font-size:13px;line-height:1.4;font-weight:700;color:#2454a6;text-transform:uppercase;{TEXT_WRAP_STYLE}">{BRAND_TITLE}</div>
+              <div style="margin-top:5px;font-size:12px;line-height:1.4;color:#6b7280;{TEXT_WRAP_STYLE}">Date de génération : {html.escape(generated_at)}</div>
+              <h1 style="margin:18px 0 0 0;font-size:24px;line-height:1.28;font-weight:700;color:#111827;{TEXT_WRAP_STYLE}">{html.escape(question)}</h1>
             </td>
           </tr>
           <tr>
-            <td style="padding:26px 30px 8px 30px;">
+            <td width="100%" style="width:100%;padding:26px 30px 8px 30px;{TEXT_WRAP_STYLE}">
               {answer_html}
             </td>
           </tr>
           <tr>
-            <td style="padding:8px 30px 0 30px;">
-              <div style="border-top:1px solid #e5e7eb;font-size:1px;line-height:1px;">&nbsp;</div>
+            <td width="100%" style="width:100%;padding:8px 30px 0 30px;{TEXT_WRAP_STYLE}">
+              <div style="border-top:1px solid #e5e7eb;font-size:1px;line-height:1px;{TEXT_WRAP_STYLE}">&nbsp;</div>
             </td>
           </tr>
           <tr>
-            <td style="padding:22px 30px 8px 30px;">
-              <h2 style="margin:0 0 14px 0;font-size:18px;line-height:1.35;font-weight:700;color:#172033;">Sources principales</h2>
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+            <td width="100%" style="width:100%;padding:22px 30px 8px 30px;{TEXT_WRAP_STYLE}">
+              <h2 style="margin:0 0 14px 0;font-size:18px;line-height:1.35;font-weight:700;color:#172033;{TEXT_WRAP_STYLE}">Sources principales</h2>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;{TEXT_WRAP_STYLE}">
                 {source_rows}
               </table>
             </td>
           </tr>
           <tr>
-            <td style="padding:14px 30px 26px 30px;">
-              <div style="font-size:12px;line-height:1.45;color:#6b7280;">{html.escape(footer)}</div>
+            <td width="100%" style="width:100%;padding:14px 30px 26px 30px;{TEXT_WRAP_STYLE}">
+              <div style="font-size:12px;line-height:1.45;color:#6b7280;{TEXT_WRAP_STYLE}">{html.escape(footer)}</div>
             </td>
           </tr>
         </table>
@@ -286,6 +289,44 @@ def clean_display_title(display_title: str | None) -> str | None:
     return clean or None
 
 
+def display_url(url: Any, limit: int = 40) -> str:
+    """Build a short visible preview of a URL for the sources list.
+
+    Only the visible text is shortened: the scheme, a leading "www.", the query
+    string and the fragment are never displayed. The caller must keep the
+    original URL for the href attribute.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return ""
+    raw = url.strip()
+    parts = urlsplit(raw)
+    host = parts.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = parts.path
+    if not host:
+        host, _, rest = path.lstrip("/").partition("/")
+        host = host.lower()
+        path = "/" + rest if rest else ""
+    if not path or path == "/":
+        full = host
+    else:
+        full = host + path.rstrip("/")
+    if len(full) <= limit:
+        return full
+    segments = [segment for segment in path.strip("/").split("/") if segment]
+    base = host
+    if segments:
+        candidate = host + "/" + segments[0] + "/"
+        if len(candidate) <= limit:
+            base = candidate
+        else:
+            base = host + "/"
+    if len(base) > limit:
+        base = base[:limit]
+    return base + "(...)"
+
+
 def build_mail(
     canonical_result: dict[str, Any],
     subject: str | None = None,
@@ -310,18 +351,32 @@ def build_mail(
     text_sources = []
     for source in cited:
         index = source.get("index")
-        title = source.get("title") or "Source sans titre"
         url = source.get("url") or ""
-        html_sources.append(
-            '<tr><td style="padding:0 0 12px 0;font-size:14px;line-height:1.45;color:#1f2933;">'
-            '<div style="font-weight:700;color:#111827;">[{}] {}</div>'
-            '<div style="margin-top:2px;"><a href="{}" style="color:#2454a6;text-decoration:underline;word-break:break-all;">{}</a></div>'
-            "</td></tr>".format(
-                html.escape(str(index)),
-                html.escape(str(title)),
-                html.escape(str(url), quote=True),
-                html.escape(str(url)),
+        title = source.get("title")
+        title = " ".join(str(title).split()) if isinstance(title, str) and title.strip() else ""
+        if not title:
+            title = display_url(url)
+        if not title:
+            title = "Source sans titre"
+        title_label = f"[{html.escape(str(index))}] {html.escape(title)}"
+        if url:
+            href = html.escape(str(url), quote=True)
+            title_link = (
+                f'<a href="{href}" style="font-weight:700;color:#111827;text-decoration:underline;{TEXT_WRAP_STYLE}">'
+                f"{title_label}</a>"
             )
+            url_link = (
+                f'<div style="margin-top:2px;{TEXT_WRAP_STYLE}">'
+                f'<a href="{href}" style="color:#6b7280;text-decoration:none;font-size:12px;{URL_WRAP_STYLE}">'
+                f"{html.escape(display_url(url))}</a></div>"
+            )
+        else:
+            title_link = f'<span style="font-weight:700;color:#111827;{TEXT_WRAP_STYLE}">{title_label}</span>'
+            url_link = ""
+        html_sources.append(
+            f'<tr><td style="padding:0 0 12px 0;font-size:14px;line-height:1.45;color:#1f2933;{TEXT_WRAP_STYLE}">'
+            f'<div style="{TEXT_WRAP_STYLE}">{title_link}</div>{url_link}'
+            "</td></tr>"
         )
         text_sources.append(f"[{index}] {title}\n{url}".rstrip())
 

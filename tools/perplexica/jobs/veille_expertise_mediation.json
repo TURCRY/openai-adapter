@@ -5,6 +5,15 @@
   "subject": "Veille expertise et médiation",
   "display_title": "Veille hebdomadaire — Expertise de justice et médiation",
   "mail_mode": "both",
+  "temporal": {
+    "enabled": true,
+    "requalification": {
+      "enabled": true,
+      "model": "local-gemma-4",
+      "batch_size": 4,
+      "timeout": 600
+    }
+  },
   "searches": [
     {
       "name": "expertise_justice",
@@ -35,6 +44,7 @@
     "enabled": true,
     "prompt_file": "../prompts/prompt_editorial_veille.md",
     "model": "local-gemma-4",
-    "timeout": 600
+    "timeout": 900,
+    "min_body_chars": 2000
   }
 }

@@ -16,7 +16,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from editorial_rewrite import DEFAULT_MODEL as DEFAULT_EDITORIAL_MODEL
 from editorial_rewrite import DEFAULT_TIMEOUT_SECONDS as EDITORIAL_TIMEOUT_SECONDS
 from editorial_rewrite import MAX_TIMEOUT_SECONDS as EDITORIAL_MAX_TIMEOUT_SECONDS
-from editorial_rewrite import EditorialConfig, EditorialRewriteError, editorial_config_from_env, rewrite_editorial
+from editorial_rewrite import EditorialConfig, EditorialRewriteError, EditorialTemporalViolationError
+from editorial_rewrite import editorial_config_from_env, rewrite_editorial, temporal_safe_raw_markdown
 from mail_builder import MailBuildError, build_mail
 from mail_sender import DEFAULT_ENV_FILE, DEFAULT_TIMEOUT_SECONDS as SMTP_TIMEOUT_SECONDS
 from mail_sender import MailSendError, send_mail, smtp_config_from_env_and_args
@@ -91,6 +92,10 @@ def validate_editorial_job_config(editorial: Any) -> None:
         raise JobConfigError("Job field 'editorial.timeout' must be positive.")
     if isinstance(editorial.get("timeout"), int) and editorial["timeout"] > EDITORIAL_MAX_TIMEOUT_SECONDS:
         raise JobConfigError(f"Job field 'editorial.timeout' must not exceed {EDITORIAL_MAX_TIMEOUT_SECONDS}.")
+    if "min_body_chars" in editorial and not isinstance(editorial["min_body_chars"], int):
+        raise JobConfigError("Job field 'editorial.min_body_chars' must be an integer when provided.")
+    if isinstance(editorial.get("min_body_chars"), int) and editorial["min_body_chars"] <= 0:
+        raise JobConfigError("Job field 'editorial.min_body_chars' must be positive.")
 
 
 def validate_searches(searches: Any) -> None:
@@ -152,6 +157,12 @@ def load_job(path: Path) -> dict[str, Any]:
         raise JobConfigError("Job field 'timeout' must be positive.")
     if "perplexica_options" in payload and not isinstance(payload["perplexica_options"], dict):
         raise JobConfigError("Job field 'perplexica_options' must be an object when provided.")
+    if "temporal" in payload:
+        temporal = payload["temporal"]
+        if not isinstance(temporal, dict):
+            raise JobConfigError("Job field 'temporal' must be an object when provided.")
+        if "enabled" in temporal and not isinstance(temporal["enabled"], bool):
+            raise JobConfigError("Job field 'temporal.enabled' must be a boolean when provided.")
     if "editorial" in payload:
         validate_editorial_job_config(payload["editorial"])
     return payload
@@ -209,6 +220,7 @@ def editorial_config_from_job(job_path: Path, job: dict[str, Any]) -> EditorialC
         model=editorial.get("model") or DEFAULT_EDITORIAL_MODEL,
         prompt_file=resolve_job_relative_path(job_path, prompt_file),
         timeout=editorial["timeout"] if "timeout" in editorial else EDITORIAL_TIMEOUT_SECONDS,
+        min_body_chars=editorial.get("min_body_chars"),
     )
 
 
@@ -295,6 +307,35 @@ def rewrite_citations(markdown: str, local_to_global: dict[int, int]) -> str:
     return CITATION_BLOCK_RE.sub(replace, markdown or "")
 
 
+BEST_TITLE_MAX_LENGTH = 160
+
+
+def better_source_title(current: Any, candidate: Any) -> Any:
+    """Pick the most informative of two Perplexica-provided titles.
+
+    Non-empty beats empty; a non-truncated title beats one ending with "...";
+    otherwise the longest title wins, capped at a reasonable length. Titles are
+    only ever selected from what Perplexica already returned.
+    """
+    current_ok = isinstance(current, str) and bool(current.strip())
+    candidate_ok = isinstance(candidate, str) and bool(candidate.strip())
+    if not current_ok:
+        return candidate if candidate_ok else current
+    if not candidate_ok:
+        return current
+    current = " ".join(current.split())
+    candidate = " ".join(candidate.split())
+    current_truncated = current.endswith("...")
+    candidate_truncated = candidate.endswith("...")
+    if current_truncated != candidate_truncated:
+        return candidate if not candidate_truncated else current
+    current_score = min(len(current), BEST_TITLE_MAX_LENGTH)
+    candidate_score = min(len(candidate), BEST_TITLE_MAX_LENGTH)
+    if candidate_score > current_score:
+        return candidate
+    return current
+
+
 def register_global_cited_sources(
     search_name: str,
     result: dict[str, Any],
@@ -324,6 +365,7 @@ def register_global_cited_sources(
         else:
             global_index = source_keys[key]
             existing = global_sources[global_index - 1]
+            existing["title"] = better_source_title(existing.get("title"), source.get("title"))
             existing.setdefault("source_searches", [])
             if search_name not in existing["source_searches"]:
                 existing["source_searches"].append(search_name)
@@ -464,6 +506,21 @@ def execute_multi_searches(
     return aggregate_search_results(job, search_runs)
 
 
+def temporal_safe_result_copy(result: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a canonical result with a temporal-safe raw answer.
+
+    Used only for the editorial fallback_raw path so the fallback mail never
+    reintroduces invalid claimed dates or freshness markers associated with a
+    temporal mismatch source.
+    """
+    safe = dict(result or {})
+    safe["answer_markdown"] = temporal_safe_raw_markdown(
+        (result or {}).get("answer_markdown") or "",
+        (result or {}).get("cited_sources") or [],
+    )
+    return safe
+
+
 def build_run_metadata(
     job_name: str,
     started_at: str,
@@ -479,6 +536,13 @@ def build_run_metadata(
     editorial_status: str = "disabled",
     editorial_model: str | None = None,
     editorial_fallback_reason: str | None = None,
+    editorial_temporal_violation_count: int | None = None,
+    editorial_retry_count: int | None = None,
+    editorial_output_validation_status: str | None = None,
+    editorial_output_invalid_reason: str | None = None,
+    editorial_citation_numbers_normalized: bool | None = None,
+    editorial_declared_citation_count: int | None = None,
+    editorial_actual_citation_count: int | None = None,
     editorial_mail_built: bool = False,
     editorial_mail_sent: bool = False,
 ) -> dict[str, Any]:
@@ -506,9 +570,53 @@ def build_run_metadata(
         "editorial_mail_sent": editorial_mail_sent,
         "error": error,
     }
+    if editorial_temporal_violation_count is not None:
+        metadata["editorial_temporal_violation_count"] = editorial_temporal_violation_count
+    if editorial_requested:
+        metadata["editorial_retry_count"] = editorial_retry_count
+        metadata["editorial_output_validation_status"] = editorial_output_validation_status
+        metadata["editorial_output_invalid_reason"] = editorial_output_invalid_reason
+        metadata["editorial_citation_numbers_normalized"] = editorial_citation_numbers_normalized
+        metadata["editorial_declared_citation_count"] = editorial_declared_citation_count
+        metadata["editorial_actual_citation_count"] = editorial_actual_citation_count
     for key in ("searches", "search_count", "completed_search_count", "empty_search_count", "failed_search_count"):
         if key in result:
             metadata[key] = result[key]
+    temporal = result.get("temporal_validation")
+    if isinstance(temporal, dict):
+        for key in (
+            "temporal_validation_count",
+            "current_count",
+            "context_count",
+            "mismatch_count",
+            "unknown_count",
+            "direct_date_count",
+            "indirect_date_count",
+            "unknown_date_count",
+        ):
+            if key in temporal:
+                metadata[key] = temporal[key]
+        metadata["temporal_validation_status"] = temporal.get("status", "completed")
+    requalification = result.get("temporal_requalification")
+    if isinstance(requalification, dict):
+        for key in (
+            "temporal_requalification_eligible_count",
+            "temporal_requalification_processed_count",
+            "temporal_requalification_accepted_count",
+            "temporal_requalification_rejected_count",
+            "temporal_requalification_error_count",
+            "temporal_requalification_current_count",
+            "temporal_requalification_context_count",
+            "temporal_requalification_unknown_count",
+            "temporal_requalification_duration_seconds",
+        ):
+            if key in requalification:
+                metadata[key] = requalification[key]
+        metadata["temporal_requalification_status"] = requalification.get(
+            "status", "disabled"
+        )
+    if editorial_temporal_violation_count is not None:
+        metadata["editorial_temporal_violation_count"] = editorial_temporal_violation_count
     return metadata
 
 
@@ -521,6 +629,63 @@ def write_mail_outputs(run_dir: Path, prefix: str, mail: dict[str, Any]) -> None
 def write_editorial_outputs(run_dir: Path, editorial: dict[str, Any], raw_text: str) -> None:
     (run_dir / "editorial_raw.txt").write_text(raw_text, encoding="utf-8")
     write_json(run_dir / "editorial.json", editorial)
+
+
+def temporal_validation_enabled(job: dict[str, Any]) -> bool:
+    temporal = job.get("temporal")
+    return isinstance(temporal, dict) and bool(temporal.get("enabled", False))
+
+
+def load_local_answers_from_run(run_dir: Path) -> dict[str, str]:
+    """Collect the local answer_markdown of every completed search."""
+    local_answers: dict[str, str] = {}
+    searches_dir = run_dir / "searches"
+    if not searches_dir.is_dir():
+        return local_answers
+    for search_dir in sorted(item for item in searches_dir.iterdir() if item.is_dir()):
+        result_file = search_dir / "result.json"
+        if not result_file.is_file():
+            continue
+        try:
+            payload = json.loads(result_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        answer = payload.get("answer_markdown") if isinstance(payload, dict) else None
+        if isinstance(answer, str) and answer.strip():
+            local_answers[search_dir.name] = answer
+    return local_answers
+
+
+def run_temporal_validation(run_dir: Path, result: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    """Validate the aggregated cited sources and persist the temporal data.
+
+    Local answers are read from <run_dir>/searches/<name>/result.json before the
+    global renumbering, so claimed dates stay attached to the original local
+    citation numbers and are then mapped to global indices by
+    validate_cited_sources via source_searches / original_indices.
+    """
+    from temporal_validation import validate_cited_sources
+
+    temporal_config = job.get("temporal") if isinstance(job.get("temporal"), dict) else {}
+    local_answers = load_local_answers_from_run(run_dir)
+    validated, summary = validate_cited_sources(
+        result.get("cited_sources") or [],
+        local_answers=local_answers,
+        run_date=temporal_config.get("run_date"),
+    )
+    result["temporal_validation"] = summary
+    result["temporal_validation_by_source"] = [
+        {
+            "index": source.get("index"),
+            "title": source.get("title"),
+            "url": source.get("url"),
+            "temporal": source.get("temporal"),
+        }
+        for source in validated
+        if isinstance(source, dict)
+    ]
+    result["cited_sources"] = validated
+    return summary
 
 
 def default_smtp_config():
@@ -564,6 +729,13 @@ def run_job(
     editorial_status = "disabled" if not editorial_requested else "failed"
     editorial_model = None
     editorial_fallback_reason = None
+    editorial_temporal_violation_count = 0
+    editorial_retry_count = 0
+    editorial_output_validation_status = None
+    editorial_output_invalid_reason = None
+    editorial_citation_numbers_normalized = None
+    editorial_declared_citation_count = None
+    editorial_actual_citation_count = None
     editorial_mail_built = False
     editorial_mail_sent = False
     result: dict[str, Any] | None = None
@@ -587,6 +759,13 @@ def run_job(
             editorial_status=editorial_status,
             editorial_model=editorial_model,
             editorial_fallback_reason=editorial_fallback_reason,
+            editorial_temporal_violation_count=editorial_temporal_violation_count,
+            editorial_retry_count=editorial_retry_count,
+            editorial_output_validation_status=editorial_output_validation_status,
+            editorial_output_invalid_reason=editorial_output_invalid_reason,
+            editorial_citation_numbers_normalized=editorial_citation_numbers_normalized,
+            editorial_declared_citation_count=editorial_declared_citation_count,
+            editorial_actual_citation_count=editorial_actual_citation_count,
             editorial_mail_built=editorial_mail_built,
             editorial_mail_sent=editorial_mail_sent,
         )
@@ -611,6 +790,24 @@ def run_job(
         except Exception as exc:
             return run_dir, finish("perplexica_failed", f"{exc.__class__.__name__}: {exc}")
 
+    if temporal_validation_enabled(job) and result is not None and result.get("status") == "completed" and is_multi_search_job(job):
+        try:
+            run_temporal_validation(run_dir, result, job)
+        except Exception as exc:
+            result["temporal_validation"] = {
+                "status": "failed",
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+        try:
+            from temporal_requalification_runner import run_temporal_requalification
+            run_temporal_requalification(run_dir, result, job)
+        except Exception as exc:
+            result["temporal_requalification"] = {
+                "status": "failed",
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+        write_json(run_dir / "result.json", result)
+
     try:
         if mail_mode in {"raw", "both"}:
             raw_mail = build_mail_func(
@@ -632,13 +829,47 @@ def run_job(
             editorial_result, editorial_raw = editorial_rewrite_func(result, editorial_config)
             write_editorial_outputs(run_dir, editorial_result, editorial_raw)
             editorial_status = "completed"
+            editorial_temporal_violation_count = (editorial_result or {}).get(
+                "editorial_temporal_violation_count",
+                (editorial_result or {}).get("temporal_violation_count", 0),
+            )
+            editorial_retry_count = (editorial_result or {}).get("editorial_retry_count", 0)
+            editorial_output_validation_status = (editorial_result or {}).get(
+                "editorial_output_validation_status"
+            )
+            editorial_output_invalid_reason = (editorial_result or {}).get(
+                "editorial_output_invalid_reason"
+            )
+            editorial_citation_numbers_normalized = (editorial_result or {}).get(
+                "editorial_citation_numbers_normalized"
+            )
+            editorial_declared_citation_count = (editorial_result or {}).get(
+                "editorial_declared_citation_count"
+            )
+            editorial_actual_citation_count = (editorial_result or {}).get(
+                "editorial_actual_citation_count"
+            )
+        except EditorialTemporalViolationError as exc:
+            editorial_status = "fallback_raw"
+            editorial_fallback_reason = str(exc)
+            editorial_temporal_violation_count = exc.violation_count
+            editorial_retry_count = getattr(exc, "retry_count", 0) or 0
+            editorial_output_validation_status = "invalid"
+            editorial_output_invalid_reason = getattr(exc, "reason", "temporal_violation")
+            editorial_result = None
         except EditorialRewriteError as exc:
             editorial_status = "fallback_raw"
             editorial_fallback_reason = str(exc)
+            editorial_retry_count = getattr(exc, "retry_count", 0) or 0
+            editorial_output_validation_status = "invalid"
+            editorial_output_invalid_reason = getattr(exc, "reason", None)
             editorial_result = None
         except Exception as exc:
             editorial_status = "fallback_raw"
             editorial_fallback_reason = f"{exc.__class__.__name__}: {exc}"
+            editorial_retry_count = 0
+            editorial_output_validation_status = "invalid"
+            editorial_output_invalid_reason = None
             editorial_result = None
 
     try:
@@ -648,18 +879,31 @@ def run_job(
                 write_mail_outputs(run_dir, "editorial", editorial_mail)
                 editorial_mail_built = True
             else:
-                raw_mail = build_mail_func(result, subject=job.get("subject"), display_title=display_title)
+                raw_mail = build_mail_func(
+                    temporal_safe_result_copy(result),
+                    subject=job.get("subject"),
+                    display_title=display_title,
+                )
                 write_mail_outputs(run_dir, "raw", raw_mail)
                 raw_mail_built = True
-        elif mail_mode == "both" and editorial_result is not None:
-            editorial_mail = build_mail_func(
-                result,
-                subject=subject_for_variant(job.get("subject"), "editorial", mail_mode),
-                editorial=editorial_result,
-                display_title=display_title,
-            )
-            write_mail_outputs(run_dir, "editorial", editorial_mail)
-            editorial_mail_built = True
+        elif mail_mode == "both":
+            if editorial_result is not None:
+                editorial_mail = build_mail_func(
+                    result,
+                    subject=subject_for_variant(job.get("subject"), "editorial", mail_mode),
+                    editorial=editorial_result,
+                    display_title=display_title,
+                )
+                write_mail_outputs(run_dir, "editorial", editorial_mail)
+                editorial_mail_built = True
+            else:
+                raw_mail = build_mail_func(
+                    temporal_safe_result_copy(result),
+                    subject=subject_for_variant(job.get("subject"), "raw", mail_mode),
+                    display_title=display_title,
+                )
+                write_mail_outputs(run_dir, "raw", raw_mail)
+                raw_mail_built = True
     except MailBuildError as exc:
         return run_dir, finish("build_failed", str(exc))
     except Exception as exc:
@@ -723,6 +967,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"completed_searches: {metadata['completed_search_count']}")
         print(f"empty_searches: {metadata['empty_search_count']}")
         print(f"failed_searches: {metadata['failed_search_count']}")
+    if "temporal_validation_count" in metadata:
+        print(f"temporal_validation: {metadata['temporal_validation_count']} "
+              f"(current={metadata.get('current_count', 0)}, "
+              f"context={metadata.get('context_count', 0)}, "
+              f"mismatch={metadata.get('mismatch_count', 0)}, "
+              f"unknown={metadata.get('unknown_count', 0)})")
+    if "temporal_requalification_status" in metadata:
+        print(f"temporal_requalification: {metadata['temporal_requalification_status']} "
+              f"(eligible={metadata.get('temporal_requalification_eligible_count', 0)}, "
+              f"accepted={metadata.get('temporal_requalification_accepted_count', 0)}, "
+              f"rejected={metadata.get('temporal_requalification_rejected_count', 0)}, "
+              f"current={metadata.get('temporal_requalification_current_count', 0)}, "
+              f"context={metadata.get('temporal_requalification_context_count', 0)}, "
+              f"unknown={metadata.get('temporal_requalification_unknown_count', 0)})")
     print(f"mail_requested: {metadata['mail_requested']}")
     print(f"mail_sent: {metadata['mail_sent']}")
     print(f"mail_mode: {metadata['mail_mode']}")

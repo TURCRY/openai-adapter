@@ -36,6 +36,18 @@ Structure recommandée :
 
 N'invente pas une section si le texte source ne permet pas de la remplir, mais ne fusionne pas un axe utile uniquement pour raccourcir la note.
 
+TEMPORALITE DES SOURCES
+
+Chaque source citée peut porter un statut temporel (champ temporal dans cited_sources) :
+
+- current : peut être présentée comme information récente si le contenu le justifie.
+- context : peut être utilisée comme cadre, référence ou historique ; ne pas la présenter comme une nouveauté de la période.
+- unknown : la source peut être utilisée avec prudence ; ne jamais affirmer une date de publication comme certaine si elle n'est pas vérifiée.
+- mismatch : une affirmation temporelle de la réponse source a été contredite par une vérification indépendante ; NE PAS reprendre la date litigieuse (invalid_claimed_dates) ; NE PAS qualifier cette source de récente, nouvelle, publiée récemment, de cette semaine, des derniers jours, ni employer toute formulation équivalente de fraîcheur ; l'utiliser uniquement comme source de contexte/référence si son contenu reste pertinent ; ne pas la présenter comme une nouveauté de la période.
+
+IMPORTANT :
+les indications temporal.status et temporal.note ont priorité sur les formulations temporelles présentes dans la réponse source. Ne reprends jamais une date listée dans invalid_claimed_dates pour la source correspondante et ne qualifie jamais cette source de récente ou nouvelle.
+
 Réponds uniquement avec un objet JSON valide :
 {
   "title": "Titre court de la note",

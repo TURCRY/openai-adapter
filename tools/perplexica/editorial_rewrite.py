@@ -13,12 +13,14 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from mail_sender import DEFAULT_ENV_FILE, parse_env_file
+from temporal_validation import DEFAULT_MISMATCH_GAP_DAYS
 
 
 ENV_EDITORIAL_BASE_URL = "PERPLEXICA_EDITORIAL_BASE_URL"
@@ -31,9 +33,492 @@ DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent / "prompts" / "prompt_edit
 CITATION_RE = re.compile(r"\[([1-9]\d*)\]")
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 
+EDITORIAL_STATUS_CURRENT = "current"
+EDITORIAL_STATUS_CONTEXT = "context"
+EDITORIAL_STATUS_UNKNOWN = "unknown"
+EDITORIAL_STATUS_MISMATCH = "mismatch"
+
+NOTE_MISMATCH_EDITORIAL = (
+    "Ne pas présenter cette source comme actualité récente "
+    "et ne pas reprendre la date invalidée."
+)
+NOTE_CONTEXT_EDITORIAL = (
+    "Source de contexte/référence ; ne pas présenter comme nouveauté de la période."
+)
+NOTE_UNKNOWN_EDITORIAL = (
+    "Temporalité non vérifiée ; ne pas affirmer une date certaine."
+)
+
+_MONTHS_FR: dict[int, tuple[str, ...]] = {
+    1: ("janvier",),
+    2: ("février", "fevrier"),
+    3: ("mars",),
+    4: ("avril",),
+    5: ("mai",),
+    6: ("juin",),
+    7: ("juillet",),
+    8: ("août", "aout"),
+    9: ("septembre",),
+    10: ("octobre",),
+    11: ("novembre",),
+    12: ("décembre", "decembre"),
+}
+
+_TEMPORAL_VERB_PREFIXES = (
+    r"a\s+été\s+publiée?\s+le\s+",
+    r"ont\s+été\s+publiées?\s+le\s+",
+    r"est\s+publiée?\s+le\s+",
+    r"sont\s+publiées?\s+le\s+",
+    r"publiée?\s+le\s+",
+    r"publiées?\s+le\s+",
+    r"publication\s+(?:du|le|au)\s+",
+    r"mise(?:s)?\s+(?:à|a)\s+jour\s+(?:le\s+)?",
+    r"mis(?:es)?\s+en\s+ligne\s+(?:le\s+)?",
+    r"actualisée?s?\s+(?:le\s+)?",
+    r"datée?s?\s+du\s+",
+)
+_TEMPORAL_VERB_RE = re.compile("|".join(_TEMPORAL_VERB_PREFIXES), re.IGNORECASE)
+
+FRESHNESS_MARKER_RE = re.compile(
+    r"\brécent(?:es?|s)?\b"
+    r"|\brécemment\b"
+    r"|\bnouveau(?:x)?\b"
+    r"|\bnouvelles?\b"
+    r"|\bcette\s+semaine\b"
+    r"|\bces\s+derniers?\s+jours\b"
+    r"|\bvien(?:t|nent)\s+(?:de\s+publier|d['\u2019]être\s+publi)"
+    r"|\bpublié(?:e|es)?\s+récemment\b"
+    r"|\bactualité\s+récente\b",
+    re.IGNORECASE,
+)
+
+
+
+def invalid_date_forms(iso_date: str) -> list[str]:
+    """Literal French/ISO representations of an ISO date (for matching)."""
+    match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", str(iso_date or "").strip())
+    if not match:
+        return []
+    year, month, day = match.group(1), int(match.group(2)), int(match.group(3))
+    forms = [
+        f"{year}-{match.group(2)}-{match.group(3)}",
+        f"{day}/{month:02d}/{year}",
+        f"{day}/{month}/{year}",
+        f"{day:02d}/{month:02d}/{year}",
+        f"{day}-{month:02d}-{year}",
+    ]
+    for name in _MONTHS_FR.get(month, ()):
+        forms.append(f"{day} {name} {year}")
+    seen: set[str] = set()
+    unique: list[str] = []
+    for form in forms:
+        if form not in seen:
+            seen.add(form)
+            unique.append(form)
+    return unique
+
+
+def _invalid_date_pattern(iso_date: str):
+    forms = invalid_date_forms(iso_date)
+    if not forms:
+        return None
+    forms = sorted(forms, key=len, reverse=True)
+    return re.compile("|".join(re.escape(form) for form in forms), re.IGNORECASE)
+
+
+def _neutralize_line(line: str, mismatch_numbers: dict[int, list[str]]) -> str:
+    numbers_in_line = extract_citation_numbers(line)
+    dates: list[str] = []
+    for number in numbers_in_line:
+        if number in mismatch_numbers:
+            dates.extend(mismatch_numbers[number])
+    if not dates:
+        return line
+    date_patterns = [
+        pattern
+        for pattern in (_invalid_date_pattern(value) for value in dates)
+        if pattern is not None
+    ]
+    if not date_patterns:
+        return line
+    if not any(pattern.search(line) for pattern in date_patterns):
+        return line
+    for pattern in date_patterns:
+        verb = _TEMPORAL_VERB_RE.pattern
+        date_pattern = pattern.pattern
+        # "Une publication du <date> ..." en début de phrase -> "Cette source ..."
+        lead = re.compile(
+            r"(?:^|([\n.:;(*\-]\s*))([Uu]ne|[Uu]n)\s+(?:" + verb + r")\s*(?:"
+            + date_pattern + r")",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        line = lead.sub(lambda match: (match.group(1) or "") + "Cette source", line)
+        # "une publication du <date>" en milieu de phrase -> "une source"
+        article = re.compile(
+            r"([Uu]ne|[Uu]n)\s+(?:" + verb + r")\s*(?:" + date_pattern + r")",
+            re.IGNORECASE,
+        )
+        line = article.sub("une source", line)
+        # span temporel nu (sans article) -> suppression
+        span = re.compile(
+            r"(?:" + verb + r")\s*(?:" + date_pattern + r")"
+            + r"(?:\s+(?:et|qui)\b)?",
+            re.IGNORECASE,
+        )
+        line = span.sub("", line)
+    for pattern in date_patterns:
+        line = re.sub(
+            r"(?:(?:du|de|le|au)\s+)?" + pattern.pattern, "", line, flags=re.IGNORECASE
+        )
+    line = re.sub(r"[ \t]{2,}", " ", line)
+    line = re.sub(r"\s+([,.;:!?])", r"\1", line)
+    line = re.sub(r",\s*,", ",", line)
+    line = re.sub(r"\s+»", "»", line)
+    line = re.sub(r"«\s+", "«", line)
+    line = re.sub(r"\(\s+", "(", line)
+    line = re.sub(r"\s+\)", ")", line)
+    return line.strip()
+
+
+def invalid_claimed_dates_for_source(temporal: dict[str, Any]) -> list[str]:
+    """Claimed publication dates contradicted by the verified source date.
+
+    A claim is invalidated only when it diverges from the verified source date
+    beyond the mismatch gap (same rule as temporal_validation). This keeps the
+    neutralization deterministic and limited to actually invalid claims.
+    """
+    if not isinstance(temporal, dict):
+        return []
+    claimed = [
+        value
+        for value in (temporal.get("claimed_dates") or [])
+        if isinstance(value, str)
+    ]
+    source_date = temporal.get("source_date")
+    if not claimed or not isinstance(source_date, str):
+        return []
+    try:
+        parsed_source = date.fromisoformat(source_date)
+    except ValueError:
+        return []
+    invalid: list[str] = []
+    for iso in claimed:
+        try:
+            parsed = date.fromisoformat(iso)
+        except ValueError:
+            continue
+        if abs((parsed - parsed_source).days) > DEFAULT_MISMATCH_GAP_DAYS:
+            invalid.append(iso)
+    return sorted(set(invalid))
+
+
+def mismatch_dates_by_number(cited_sources: list[dict[str, Any]]) -> dict[int, list[str]]:
+    """Map each mismatch source index to its invalid claimed dates."""
+    mismatch_numbers: dict[int, list[str]] = {}
+    for source in cited_sources or []:
+        if not isinstance(source, dict):
+            continue
+        temporal = source.get("temporal")
+        if not isinstance(temporal, dict):
+            continue
+        if temporal.get("temporal_status") != EDITORIAL_STATUS_MISMATCH:
+            continue
+        number = source.get("index")
+        if not isinstance(number, int):
+            continue
+        invalid = invalid_claimed_dates_for_source(temporal)
+        if invalid:
+            mismatch_numbers[number] = invalid
+    return mismatch_numbers
+
+
+def _nearest_citation_number(line: str, marker_start: int) -> int | None:
+    """Return the citation number closest to a marker position within a line."""
+    best_number: int | None = None
+    best_distance: int | None = None
+    for match in CITATION_RE.finditer(line):
+        distance = min(
+            abs(match.start() - marker_start),
+            abs(match.end() - 1 - marker_start),
+        )
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_number = int(match.group(1))
+    return best_number
+
+
+_V_PUBLIER_RE = re.compile(r"^vien(?:t|nent)\s+de\s+publier$", re.IGNORECASE)
+_V_ETRE_PUBLIE_RE = re.compile(r"^vien(?:t|nent)\s+d['\u2019]\u00eatre\s+(publi\w*)$", re.IGNORECASE)
+_PUBLIE_RECENT_RE = re.compile(r"^(publi\w*)\s+r\u00e9cemment$", re.IGNORECASE)
+
+
+def _freshness_marker_replacement(matched: str) -> str:
+    """Return the deterministic replacement for a freshness marker span.
+
+    Plain markers (récents, cette semaine, ...) are removed. Verb phrases are
+    rewritten without their freshness claim so the surrounding grammar stays
+    readable in the temporal-safe raw fallback.
+    """
+    if _V_PUBLIER_RE.fullmatch(matched.strip()):
+        return "ont publié" if matched.strip().startswith(("viennent", "Viennent")) else "a publié"
+    etre = _V_ETRE_PUBLIE_RE.fullmatch(matched.strip())
+    if etre:
+        prefix = "ont été " if matched.strip().startswith(("viennent", "Viennent")) else "a été "
+        return prefix + etre.group(1)
+    publie = _PUBLIE_RECENT_RE.fullmatch(matched.strip())
+    if publie:
+        return publie.group(1)
+    return ""
+
+
+def neutralize_mismatch_freshness(
+    response_markdown: str,
+    cited_sources: list[dict[str, Any]],
+) -> str:
+    """Neutralize freshness markers attributed to temporal mismatch sources.
+
+    Only markers whose nearest citation in the same line belongs to a
+    temporal.status=mismatch source are removed. Markers that qualify another
+    citation (e.g. "Une publication récente [11] compare une ancienne
+    référence [10]") are kept. Non-temporal facts and citations are never
+    removed and no new date is ever invented.
+    """
+    if not isinstance(response_markdown, str) or not response_markdown:
+        return response_markdown or ""
+    mismatch_numbers: set[int] = set()
+    for source in cited_sources or []:
+        if not isinstance(source, dict):
+            continue
+        temporal = source.get("temporal")
+        if not isinstance(temporal, dict):
+            continue
+        if temporal.get("temporal_status") != EDITORIAL_STATUS_MISMATCH:
+            continue
+        number = source.get("index")
+        if isinstance(number, int):
+            mismatch_numbers.add(number)
+    if not mismatch_numbers:
+        return response_markdown
+
+    out_lines: list[str] = []
+    for line in response_markdown.split("\n"):
+        if not CITATION_RE.search(line):
+            out_lines.append(line)
+            continue
+        markers = list(FRESHNESS_MARKER_RE.finditer(line))
+        if not markers:
+            out_lines.append(line)
+            continue
+        replacements: list[tuple[int, int, str]] = []
+        for marker in markers:
+            number = _nearest_citation_number(line, marker.start())
+            if number not in mismatch_numbers:
+                continue
+            matched = marker.group(0)
+            replacement = _freshness_marker_replacement(matched)
+            replacements.append((marker.start(), marker.end(), replacement))
+        if not replacements:
+            out_lines.append(line)
+            continue
+        for start, end, replacement in sorted(replacements, reverse=True):
+            line = line[:start] + replacement + line[end:]
+        line = re.sub(r"[ \t]{2,}", " ", line)
+        line = re.sub(r"^[,;:\s]+", "", line)
+        line = re.sub(r"\s+([,.;:!?])", r"\1", line)
+        line = re.sub(r",\s*,", ",", line)
+        line = re.sub(r"\s+»", "»", line)
+        line = re.sub(r"«\s+", "«", line)
+        line = re.sub(r"\(\s+", "(", line)
+        line = re.sub(r"\s+\)", ")", line)
+        out_lines.append(line.strip())
+    return "\n".join(out_lines)
+
+
+def temporal_safe_raw_markdown(
+    response_markdown: str,
+    cited_sources: list[dict[str, Any]],
+) -> str:
+    """Neutralize invalid dates and freshness markers near mismatch sources.
+
+    Reusable for the material sent to Gemma and for the temporal-safe raw
+    fallback mail, so a fallback never reintroduces invalid temporal claims.
+    """
+    neutralized = neutralize_mismatch_claims(response_markdown, cited_sources)
+    return neutralize_mismatch_freshness(neutralized, cited_sources)
+
+
+def neutralize_mismatch_claims(
+    response_markdown: str,
+    cited_sources: list[dict[str, Any]],
+) -> str:
+    """Neutralize invalid claimed dates near mismatch sources (deterministic).
+
+    Only lines containing both a mismatch citation and one of its invalid
+    claimed dates are modified. Citations, non-temporal facts and other
+    sources are left untouched. No new date is ever invented.
+    """
+    if not isinstance(response_markdown, str) or not response_markdown:
+        return response_markdown or ""
+    mismatch_numbers = mismatch_dates_by_number(cited_sources)
+    if not mismatch_numbers:
+        return response_markdown
+    lines = response_markdown.split("\n")
+    return "\n".join(_neutralize_line(line, mismatch_numbers) for line in lines)
+
+
+_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?\n]")
+
+
+def _citation_spans(body: str) -> list[tuple[int, int, int]]:
+    return [
+        (int(match.group(1)), match.start(), match.end())
+        for match in CITATION_RE.finditer(body)
+    ]
+
+
+def _freshness_violations(
+    body: str,
+    mismatch_numbers: set[int],
+    proximity_chars: int = 350,
+) -> list[dict[str, Any]]:
+    """Detect explicit freshness markers attributed to mismatch citations.
+
+    Each citation gets a local segment bounded by neighbouring citations and
+    sentence boundaries so a marker attached to another source in the same
+    paragraph is never misattributed to the mismatch source.
+    """
+    if not mismatch_numbers or not body:
+        return []
+    spans = _citation_spans(body)
+    violations: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    for index, (number, start, end) in enumerate(spans):
+        if number not in mismatch_numbers:
+            continue
+        left = start - proximity_chars
+        right = end + proximity_chars
+        if index > 0:
+            left = max(left, spans[index - 1][2])
+        if index < len(spans) - 1:
+            right = min(right, spans[index + 1][1])
+        before = list(_SENTENCE_BOUNDARY_RE.finditer(body, max(0, left), start))
+        if before:
+            left = max(left, before[-1].end())
+        after = list(_SENTENCE_BOUNDARY_RE.finditer(body, end, min(len(body), right)))
+        if after:
+            right = min(right, after[0].start())
+        segment = body[max(0, left):right]
+        for marker in FRESHNESS_MARKER_RE.finditer(segment):
+            matched = marker.group(0).strip()
+            key = (number, matched.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            violations.append(
+                {
+                    "source_number": number,
+                    "type": "freshness_marker",
+                    "matched_marker": matched,
+                }
+            )
+    return violations
+
+
+def editorial_temporal_violations(
+    body_markdown: str,
+    cited_sources: list[dict[str, Any]],
+    proximity_chars: int = 350,
+) -> list[dict[str, Any]]:
+    """Detect temporal violations near mismatch citations.
+
+    Two deterministic checks run locally around each mismatch citation:
+    reuse of an invalid claimed date and explicit freshness markers
+    (récents, nouvelle, cette semaine, ...).
+    """
+    body = body_markdown or ""
+    violations: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    mismatch_numbers: set[int] = set()
+    for source in cited_sources or []:
+        if not isinstance(source, dict):
+            continue
+        temporal = source.get("temporal")
+        if not isinstance(temporal, dict):
+            continue
+        if temporal.get("temporal_status") != EDITORIAL_STATUS_MISMATCH:
+            continue
+        number = source.get("index")
+        if not isinstance(number, int):
+            continue
+        mismatch_numbers.add(number)
+        citation_re = re.compile(r"\[" + str(number) + r"\]")
+        for iso in invalid_claimed_dates_for_source(temporal):
+            if not isinstance(iso, str):
+                continue
+            key = (number, iso)
+            if key in seen:
+                continue
+            found = False
+            for form in invalid_date_forms(iso):
+                for match in re.finditer(re.escape(form), body, re.IGNORECASE):
+                    start = match.start()
+                    window = body[
+                        max(0, start - proximity_chars): start + proximity_chars
+                    ]
+                    if citation_re.search(window):
+                        violations.append(
+                            {
+                                "source_number": number,
+                                "type": "invalid_date",
+                                "invalid_claimed_date": iso,
+                                "matched_form": form,
+                            }
+                        )
+                        found = True
+                        break
+                if found:
+                    break
+            if found:
+                seen.add(key)
+    violations.extend(_freshness_violations(body, mismatch_numbers, proximity_chars))
+    return violations
+
+
+
 
 class EditorialRewriteError(Exception):
     """User-facing editorial rewrite failure."""
+
+
+class EditorialOutputValidationError(EditorialRewriteError):
+    """Raised when the parsed editorial JSON is structurally invalid.
+
+    ``reason`` carries a stable machine-readable code (e.g.
+    body_too_short, unexpected_sectioned_output, citations_inconsistent,
+    invented_citation, body_truncated, invalid_json) so the caller can trace
+    why the output was rejected and decide to retry once.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        reason: str | None = None,
+        retry_count: int = 0,
+    ):
+        super().__init__(message)
+        self.reason = reason
+        self.retry_count = retry_count
+
+
+class EditorialTemporalViolationError(EditorialRewriteError):
+    """Raised when the editorial output reuses an invalid claimed date."""
+
+    def __init__(self, message: str, violations: list[dict[str, Any]] | None = None):
+        super().__init__(message)
+        self.violations = list(violations or [])
+        self.violation_count = len(self.violations)
+        self.reason = "temporal_violation"
+        self.retry_count = 0
 
 
 @dataclass(frozen=True)
@@ -43,6 +528,7 @@ class EditorialConfig:
     prompt_file: Path = DEFAULT_PROMPT_FILE
     api_key: str | None = None
     timeout: int = DEFAULT_TIMEOUT_SECONDS
+    min_body_chars: int | None = None
 
 
 def extract_citation_numbers(text: str) -> list[int]:
@@ -74,19 +560,56 @@ def prepare_editorial_input(canonical_result: dict[str, Any]) -> dict[str, Any]:
         number = source.get("index")
         if not isinstance(number, int) or number not in allowed_numbers:
             continue
-        cited_sources.append(
-            {
-                "number": number,
-                "title": str(source.get("title") or ""),
+        entry: dict[str, Any] = {
+            "number": number,
+            "title": str(source.get("title") or ""),
+        }
+        temporal = source.get("temporal")
+        if isinstance(temporal, dict):
+            compact: dict[str, Any] = {
+                "status": temporal.get("temporal_status"),
+                "role": temporal.get("temporal_role"),
             }
-        )
-    editorial_response = canonical_result.get("editorial_answer_markdown") or canonical_result.get("answer_markdown") or ""
+            source_date = temporal.get("source_date")
+            if isinstance(source_date, str) and source_date:
+                compact["source_date"] = source_date
+            status = temporal.get("temporal_status")
+            note = temporal.get("note")
+            existing_note = note.strip() if isinstance(note, str) else ""
+            if status == EDITORIAL_STATUS_MISMATCH:
+                invalid = invalid_claimed_dates_for_source(temporal)
+                if invalid:
+                    compact["invalid_claimed_dates"] = invalid
+                compact["note"] = NOTE_MISMATCH_EDITORIAL
+            elif status == EDITORIAL_STATUS_CONTEXT:
+                compact["note"] = existing_note or NOTE_CONTEXT_EDITORIAL
+            elif status == EDITORIAL_STATUS_UNKNOWN:
+                compact["note"] = existing_note or NOTE_UNKNOWN_EDITORIAL
+            else:
+                if existing_note:
+                    compact["note"] = existing_note
+            entry["temporal"] = compact
+        cited_sources.append(entry)
+    raw_response = canonical_result.get("editorial_answer_markdown") or canonical_result.get("answer_markdown") or ""
+    editorial_response = temporal_safe_raw_markdown(
+        raw_response,
+        canonical_result.get("cited_sources") or [],
+    )
     payload = {
         "question": canonical_result.get("question") or "",
         "response": editorial_response,
         "citation_numbers": sorted(allowed_numbers),
         "cited_sources": cited_sources,
     }
+    temporal_summary = canonical_result.get("temporal_validation")
+    if isinstance(temporal_summary, dict) and temporal_summary.get("status") == "completed":
+        payload["temporal_validation"] = {
+            "validated_count": temporal_summary.get("temporal_validation_count"),
+            "current_count": temporal_summary.get("current_count"),
+            "context_count": temporal_summary.get("context_count"),
+            "mismatch_count": temporal_summary.get("mismatch_count"),
+            "unknown_count": temporal_summary.get("unknown_count"),
+        }
     searches = canonical_result.get("searches")
     if isinstance(searches, dict):
         payload["searches"] = {
@@ -185,6 +708,138 @@ def call_editorial_llm(config: EditorialConfig, messages: list[dict[str, str]]) 
     return extract_response_content(payload)
 
 
+RETRY_STRUCTURE_INSTRUCTION = (
+    "Retourne exactement et uniquement les clés :\n"
+    "title\nbody_markdown\ncitation_numbers\n\n"
+    "Tout le contenu éditorial doit être dans body_markdown.\n"
+    "Ne crée aucune autre section ou clé."
+)
+
+
+def reinforce_editorial_prompt(system_prompt: str) -> str:
+    """Append the strict-output instruction used for the single retry pass."""
+    prompt = (system_prompt or "").rstrip()
+    if prompt and not prompt.endswith("\n"):
+        prompt += "\n"
+    return prompt + "\n" + RETRY_STRUCTURE_INSTRUCTION + "\n"
+
+
+SECTIONED_KEY_MIN_CHARS = 200
+SECTIONED_EXCLUDED_KEYS = frozenset({"title", "body_markdown", "citation_numbers"})
+
+
+def _sectioned_output(
+    editorial: dict[str, Any],
+    body: str,
+    min_body_chars: int | None,
+) -> bool:
+    """True when body_markdown is short and long content sits in other keys."""
+    if not min_body_chars:
+        return False
+    if len(body) >= min_body_chars:
+        return False
+    for key, value in editorial.items():
+        if key in SECTIONED_EXCLUDED_KEYS:
+            continue
+        if isinstance(value, str) and len(value) >= SECTIONED_KEY_MIN_CHARS:
+            return True
+        if isinstance(value, list):
+            total = sum(len(item) if isinstance(item, str) else 0 for item in value)
+            if total >= SECTIONED_KEY_MIN_CHARS:
+                return True
+    return False
+
+
+def _body_looks_truncated(body: str) -> bool:
+    stripped = (body or "").rstrip()
+    if not stripped:
+        return True
+    if stripped.count("```") % 2 != 0:
+        return True
+    if re.search(r"(^|\n)#{1,6}\s*[^\n]*$", stripped):
+        return True
+    return False
+
+
+def validate_editorial_output(
+    editorial: dict[str, Any],
+    allowed_numbers: list[int],
+    min_body_chars: int | None = None,
+) -> None:
+    """Validate the parsed editorial JSON structure and citations.
+
+    Raises EditorialOutputValidationError with a precise reason when the
+    output is structurally degraded so the pipeline can retry once.
+    """
+    title = editorial.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise EditorialOutputValidationError(
+            "Editorial JSON missing string field 'title'.", "invalid_json"
+        )
+    body = editorial.get("body_markdown")
+    if not isinstance(body, str):
+        raise EditorialOutputValidationError(
+            "Editorial JSON field 'body_markdown' must be a string.", "invalid_json"
+        )
+    if _sectioned_output(editorial, body, min_body_chars):
+        raise EditorialOutputValidationError(
+            "Editorial JSON puts long content in unexpected keys while "
+            "body_markdown is short.",
+            "unexpected_sectioned_output",
+        )
+    if min_body_chars and len(body) < min_body_chars:
+        raise EditorialOutputValidationError(
+            "Editorial body_markdown too short ({} chars < {}).".format(
+                len(body), min_body_chars
+            ),
+            "body_too_short",
+        )
+    if _body_looks_truncated(body):
+        raise EditorialOutputValidationError(
+            "Editorial body_markdown appears truncated.", "body_truncated"
+        )
+
+    allowed = set(allowed_numbers)
+    detected = extract_citation_numbers(body)
+    unknown = [number for number in detected if number not in allowed]
+    if unknown:
+        raise EditorialOutputValidationError(
+            "Editorial output contains unknown citations: {}".format(unknown),
+            "invented_citation",
+        )
+    declared = [
+        number
+        for number in (editorial.get("citation_numbers") or [])
+        if isinstance(number, int) and number > 0
+    ]
+    declared_unknown = [number for number in declared if number not in allowed]
+    if declared_unknown:
+        raise EditorialOutputValidationError(
+            "Editorial JSON declares unknown citations: {}".format(declared_unknown),
+            "invented_citation",
+        )
+    missing = sorted(set(declared) - set(detected))
+    extra = sorted(set(detected) - set(declared))
+    normalized = False
+    if missing and not extra:
+        raise EditorialOutputValidationError(
+            "Editorial citation_numbers declare citations absent from the body "
+            "with no body citation left undeclared (declared_missing={}).".format(
+                missing
+            ),
+            "citations_inconsistent",
+        )
+    declared_order = list(dict.fromkeys(declared))
+    if detected != declared_order:
+        normalized = True
+    editorial["citation_numbers"] = detected
+    return {
+        "normalized": normalized,
+        "declared_count": len(declared),
+        "actual_count": len(detected),
+    }
+
+
 def parse_editorial_output(raw_text: str) -> dict[str, Any]:
     text = (raw_text or "").strip()
     if not text:
@@ -215,23 +870,31 @@ def parse_editorial_output(raw_text: str) -> dict[str, Any]:
             raise EditorialRewriteError("Editorial JSON missing string field 'body_markdown'.")
         if not isinstance(numbers, list) or not all(isinstance(item, int) and item > 0 for item in numbers):
             raise EditorialRewriteError("Editorial JSON field 'citation_numbers' must be a list of positive integers.")
-        return {"title": title.strip(), "body_markdown": body.strip(), "citation_numbers": list(dict.fromkeys(numbers))}
+        parsed["title"] = title.strip()
+        parsed["body_markdown"] = body.strip()
+        parsed["citation_numbers"] = list(dict.fromkeys(numbers))
+        return parsed
     raise EditorialRewriteError("Editorial output did not contain valid JSON.") from last_error
 
 
 def validate_editorial_citations(editorial: dict[str, Any], allowed_numbers: list[int]) -> None:
-    allowed = set(allowed_numbers)
-    detected = extract_citation_numbers(editorial.get("body_markdown", ""))
-    unknown = [number for number in detected if number not in allowed]
-    if unknown:
-        raise EditorialRewriteError(f"Editorial output contains unknown citations: {unknown}")
-    declared_unknown = [number for number in editorial.get("citation_numbers", []) if number not in allowed]
-    if declared_unknown:
-        raise EditorialRewriteError(f"Editorial JSON declares unknown citations: {declared_unknown}")
-    editorial["citation_numbers"] = detected
+    """Backward-compatible wrapper over validate_editorial_output."""
+    validate_editorial_output(editorial, allowed_numbers)
 
 
-def build_editorial_result(canonical_result: dict[str, Any], editorial: dict[str, Any], raw_text: str, model: str) -> dict[str, Any]:
+def build_editorial_result(
+    canonical_result: dict[str, Any],
+    editorial: dict[str, Any],
+    raw_text: str,
+    model: str,
+    temporal_violation_count: int = 0,
+    retry_count: int = 0,
+    output_validation_status: str = "ok",
+    output_invalid_reason: str | None = None,
+    citation_numbers_normalized: bool | None = None,
+    declared_citation_count: int | None = None,
+    actual_citation_count: int | None = None,
+) -> dict[str, Any]:
     return {
         "status": "completed",
         "model": model,
@@ -241,6 +904,14 @@ def build_editorial_result(canonical_result: dict[str, Any], editorial: dict[str
         "raw_length": len(raw_text),
         "source_chat_id": canonical_result.get("chat_id"),
         "source_message_id": canonical_result.get("message_id"),
+        "editorial_temporal_violation_count": temporal_violation_count,
+        "temporal_violation_count": temporal_violation_count,
+        "editorial_retry_count": retry_count,
+        "editorial_output_validation_status": output_validation_status,
+        "editorial_output_invalid_reason": output_invalid_reason,
+        "editorial_citation_numbers_normalized": citation_numbers_normalized,
+        "editorial_declared_citation_count": declared_citation_count,
+        "editorial_actual_citation_count": actual_citation_count,
     }
 
 
@@ -250,13 +921,83 @@ def rewrite_editorial(
     *,
     llm_func=call_editorial_llm,
 ) -> tuple[dict[str, Any], str]:
+    """Rewrite the editorial answer with a single controlled retry.
+
+    Transport/config errors (raised by llm_func) are never retried. A
+    structurally degraded or temporally violating output triggers exactly one
+    new Gemma pass with a reinforced structure instruction. If the retry also
+    fails, the exception propagates and the caller falls back to the raw mail.
+    """
     editorial_input = prepare_editorial_input(canonical_result)
     system_prompt = read_editorial_prompt(config.prompt_file)
-    messages = build_messages(system_prompt, editorial_input)
-    raw_text = llm_func(config, messages)
-    editorial = parse_editorial_output(raw_text)
-    validate_editorial_citations(editorial, editorial_input["citation_numbers"])
-    return build_editorial_result(canonical_result, editorial, raw_text, config.model), raw_text
+    retry_count = 0
+    while True:
+        prompt = reinforce_editorial_prompt(system_prompt) if retry_count else system_prompt
+        messages = build_messages(prompt, editorial_input)
+        raw_text = llm_func(config, messages)
+        citation_stats: dict[str, Any] | None = None
+        try:
+            editorial = parse_editorial_output(raw_text)
+            citation_stats = validate_editorial_output(
+                editorial,
+                editorial_input["citation_numbers"],
+                min_body_chars=config.min_body_chars,
+            )
+            violations = editorial_temporal_violations(
+                editorial["body_markdown"],
+                canonical_result.get("cited_sources") or [],
+            )
+            if violations:
+                raise EditorialTemporalViolationError(
+                    "Editorial output contains temporal violations "
+                    "(editorial_temporal_violation_count={}): {}".format(
+                        len(violations),
+                        [violation["source_number"] for violation in violations],
+                    ),
+                    violations,
+                )
+        except EditorialTemporalViolationError as exc:
+            if retry_count >= 1:
+                exc.retry_count = retry_count
+                raise
+            retry_count += 1
+            continue
+        except EditorialOutputValidationError as exc:
+            if retry_count >= 1:
+                exc.retry_count = retry_count
+                raise
+            retry_count += 1
+            continue
+        except EditorialRewriteError as exc:
+            wrapped = EditorialOutputValidationError(
+                str(exc), reason="invalid_json", retry_count=retry_count
+            )
+            if retry_count >= 1:
+                raise wrapped
+            retry_count += 1
+            continue
+        return (
+            build_editorial_result(
+                canonical_result,
+                editorial,
+                raw_text,
+                config.model,
+                temporal_violation_count=0,
+                retry_count=retry_count,
+                output_validation_status="ok",
+                output_invalid_reason=None,
+                citation_numbers_normalized=bool(
+                    citation_stats and citation_stats["normalized"]
+                ),
+                declared_citation_count=(
+                    citation_stats or {}
+                ).get("declared_count"),
+                actual_citation_count=(
+                    citation_stats or {}
+                ).get("actual_count"),
+            ),
+            raw_text,
+        )
 
 
 def env_value(name: str, file_values: dict[str, str]) -> str:
@@ -270,6 +1011,7 @@ def editorial_config_from_env(
     prompt_file: Path | None = None,
     timeout: int | None = None,
     env_file: Path = DEFAULT_ENV_FILE,
+    min_body_chars: int | None = None,
 ) -> EditorialConfig:
     file_values = parse_env_file(env_file)
     base_url = env_value(ENV_EDITORIAL_BASE_URL, file_values).strip()
@@ -284,6 +1026,7 @@ def editorial_config_from_env(
         prompt_file=prompt_file or DEFAULT_PROMPT_FILE,
         api_key=api_key,
         timeout=DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout,
+        min_body_chars=min_body_chars,
     )
 
 

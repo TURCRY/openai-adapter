@@ -12,12 +12,14 @@ from perplexica_client import PerplexicaClientError
 from run_perplexica_mail_job import (
     JobConfigError,
     aggregate_search_results,
+    better_source_title,
     classify_search_result,
     load_job,
     read_prompt,
     resolve_prompt_path,
     run_job,
     subject_for_variant,
+    temporal_safe_result_copy,
 )
 
 
@@ -591,6 +593,60 @@ class RunPerplexicaMailJobTests(unittest.TestCase):
         self.assertIn("Réponse b [1].", aggregate["answer_markdown"])
         self.assertEqual(aggregate["citation_numbers"], [1])
 
+    def test_dedup_prefers_full_title_when_truncated_came_first(self):
+        job = {"name": "job", "display_title": "Titre"}
+        first = result_for("a", source_url="https://same.example/page", local_index=1)
+        first["all_sources"][0]["title"] = "Titre tronqué ..."
+        first["cited_sources"][0]["title"] = "Titre tronqué ..."
+        second = result_for("b", source_url="https://same.example/page", local_index=42, answer="Réponse b [42].")
+        second["all_sources"][0]["title"] = "Titre complet et détaillé avec beaucoup plus d'information"
+        second["cited_sources"][0]["title"] = "Titre complet et détaillé avec beaucoup plus d'information"
+        aggregate = aggregate_search_results(
+            job,
+            [
+                {"name": "a", "title": "A", "status": "completed", "result": first},
+                {"name": "b", "title": "B", "status": "completed", "result": second},
+            ],
+        )
+        self.assertEqual(len(aggregate["cited_sources"]), 1)
+        self.assertEqual(
+            aggregate["cited_sources"][0]["title"],
+            "Titre complet et détaillé avec beaucoup plus d'information",
+        )
+
+    def test_dedup_keeps_full_title_when_truncated_came_second(self):
+        job = {"name": "job", "display_title": "Titre"}
+        first = result_for("a", source_url="https://same.example/page", local_index=1)
+        first["all_sources"][0]["title"] = "Titre complet et détaillé avec beaucoup plus d'information"
+        first["cited_sources"][0]["title"] = "Titre complet et détaillé avec beaucoup plus d'information"
+        second = result_for("b", source_url="https://same.example/page", local_index=42, answer="Réponse b [42].")
+        second["all_sources"][0]["title"] = "Titre tronqué ..."
+        second["cited_sources"][0]["title"] = "Titre tronqué ..."
+        aggregate = aggregate_search_results(
+            job,
+            [
+                {"name": "a", "title": "A", "status": "completed", "result": first},
+                {"name": "b", "title": "B", "status": "completed", "result": second},
+            ],
+        )
+        self.assertEqual(len(aggregate["cited_sources"]), 1)
+        self.assertEqual(
+            aggregate["cited_sources"][0]["title"],
+            "Titre complet et détaillé avec beaucoup plus d'information",
+        )
+
+    def test_better_source_title_rules(self):
+        self.assertEqual(better_source_title("", "Titre"), "Titre")
+        self.assertEqual(better_source_title(None, "Titre"), "Titre")
+        self.assertEqual(better_source_title("Titre", ""), "Titre")
+        self.assertEqual(
+            better_source_title("Court", "Un titre nettement plus long et informatif"),
+            "Un titre nettement plus long et informatif",
+        )
+        self.assertEqual(better_source_title("Tronqué ...", "Titre complet"), "Titre complet")
+        self.assertEqual(better_source_title("Titre complet", "Tronqué ..."), "Titre complet")
+        self.assertEqual(better_source_title("Égal", "Égal"), "Égal")
+
     def test_aggregate_metrics_and_semantics(self):
         aggregate = aggregate_search_results(
             {"name": "job", "display_title": "Titre"},
@@ -669,6 +725,309 @@ class RunPerplexicaMailJobTests(unittest.TestCase):
         self.assertEqual(len(result["cited_sources"]), 6)
         for source in result["cited_sources"]:
             self.assertNotIn("content", source)
+
+
+    def test_multisearch_requalification_invoked_and_stats_persisted(self):
+        from unittest import mock
+        payload = self.write_multi_job(
+            temporal={
+                "enabled": True,
+                "requalification": {
+                    "enabled": True,
+                    "model": "local-gemma-4",
+                    "batch_size": 4,
+                    "timeout": 600,
+                },
+            }
+        )
+        fake_summary = {
+            "status": "completed",
+            "temporal_requalification_eligible_count": 3,
+            "temporal_requalification_processed_count": 3,
+            "temporal_requalification_accepted_count": 2,
+            "temporal_requalification_rejected_count": 1,
+            "temporal_requalification_error_count": 0,
+            "temporal_requalification_current_count": 1,
+            "temporal_requalification_context_count": 2,
+            "temporal_requalification_unknown_count": 0,
+            "temporal_requalification_duration_seconds": 1.5,
+        }
+
+        def fake_runner(run_dir, result, job):
+            result["temporal_requalification"] = fake_summary
+            return fake_summary
+
+        with mock.patch(
+            "run_perplexica_mail_job.run_temporal_validation",
+            return_value={"status": "completed", "temporal_validation_count": 10},
+        ) as tv, mock.patch(
+            "temporal_requalification_runner.run_temporal_requalification",
+            side_effect=fake_runner,
+        ) as rq:
+            run_dir, metadata = run_job(
+                self.job_path,
+                dry_run=True,
+                output_root=self.output_root,
+                client_factory=FakeClient,
+                build_mail_func=mail_for_call,
+                editorial_rewrite_func=lambda result, config: (editorial_payload(), "raw llm"),
+            )
+        tv.assert_called_once()
+        rq.assert_called_once()
+        result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["temporal_requalification"]["status"], "completed")
+        self.assertEqual(metadata["temporal_requalification_accepted_count"], 2)
+        self.assertEqual(metadata["temporal_requalification_status"], "completed")
+
+    def test_multisearch_requalification_disabled_python_only(self):
+        from unittest import mock
+        payload = self.write_multi_job(
+            temporal={"enabled": True, "requalification": {"enabled": False}}
+        )
+        with mock.patch(
+            "run_perplexica_mail_job.run_temporal_validation",
+            return_value={"status": "completed", "temporal_validation_count": 10},
+        ):
+            run_dir, metadata = run_job(
+                self.job_path,
+                dry_run=True,
+                output_root=self.output_root,
+                client_factory=FakeClient,
+                build_mail_func=mail_for_call,
+                editorial_rewrite_func=lambda result, config: (editorial_payload(), "raw llm"),
+            )
+        result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+        # Le runner est appelé mais court-circuite sans réseau ni mutation :
+        # statut disabled, aucun compteur, aucun champ Gemma sur les sources.
+        self.assertEqual(result["temporal_requalification"]["status"], "disabled")
+        self.assertEqual(
+            result["temporal_requalification"]["temporal_requalification_eligible_count"], 0
+        )
+        for source in result["cited_sources"]:
+            self.assertNotIn("gemma_recommended_status", source.get("temporal") or {})
+
+    def test_editorial_temporal_violation_falls_back_to_raw_with_count(self):
+        from editorial_rewrite import EditorialTemporalViolationError
+        violations = [
+            {
+                "source_number": 10,
+                "invalid_claimed_date": "2026-08-20",
+                "matched_form": "20 août 2026",
+            }
+        ]
+
+        def rewriter(result, config):
+            raise EditorialTemporalViolationError(
+                "Editorial output contains temporal violations "
+                "(editorial_temporal_violation_count=1).",
+                violations,
+            )
+
+        run_dir, metadata = run_job(
+            self.job_path,
+            dry_run=True,
+            output_root=self.output_root,
+            client_factory=FakeClient,
+            build_mail_func=mail_for_call,
+            editorial_rewrite_func=rewriter,
+        )
+        self.assertEqual(metadata["editorial_status"], "fallback_raw")
+        self.assertEqual(metadata["editorial_temporal_violation_count"], 1)
+        self.assertTrue((run_dir / "raw_mail.txt").exists())
+        self.assertFalse((run_dir / "editorial_mail.txt").exists())
+
+    def test_real_job_editorial_timeout_is_900(self):
+        job_path = Path(__file__).resolve().parent / "jobs" / "veille_expertise_mediation.json"
+        job = load_job(job_path)
+        self.assertEqual(job["editorial"]["timeout"], 900)
+        temporal = job.get("temporal") or {}
+        self.assertTrue(temporal.get("enabled"))
+        self.assertTrue(((temporal.get("requalification") or {}).get("enabled")))
+
+
+
+    def test_editorial_min_body_chars_is_passed_to_rewriter(self):
+        self.write_job(
+            editorial={
+                "enabled": True,
+                "prompt_file": "../prompts/editorial.md",
+                "model": "local-gemma-4",
+                "min_body_chars": 2000,
+            }
+        )
+        captured = {}
+
+        def rewriter(result, config):
+            captured["min_body_chars"] = config.min_body_chars
+            return editorial_payload(), "raw llm"
+
+        _, metadata = run_job(
+            self.job_path,
+            dry_run=True,
+            output_root=self.output_root,
+            client_factory=FakeClient,
+            build_mail_func=mail_for_call,
+            editorial_rewrite_func=rewriter,
+        )
+        self.assertEqual(metadata["status"], "completed_no_mail")
+        self.assertEqual(captured["min_body_chars"], 2000)
+
+    def test_rejects_invalid_editorial_min_body_chars(self):
+        for value in (0, -5):
+            with self.subTest(value=value):
+                self.write_job(editorial={"enabled": True, "min_body_chars": value})
+                with self.assertRaises(JobConfigError):
+                    load_job(self.job_path)
+        self.write_job(editorial={"enabled": True, "min_body_chars": "long"})
+        with self.assertRaises(JobConfigError):
+            load_job(self.job_path)
+
+    def test_run_json_records_editorial_output_diagnostics_on_success(self):
+        payload = dict(editorial_payload())
+        payload["editorial_retry_count"] = 1
+        payload["editorial_output_validation_status"] = "ok"
+        payload["editorial_output_invalid_reason"] = None
+        payload["editorial_citation_numbers_normalized"] = True
+        payload["editorial_declared_citation_count"] = 3
+        payload["editorial_actual_citation_count"] = 5
+
+        run_dir, metadata = run_job(
+            self.job_path,
+            dry_run=True,
+            output_root=self.output_root,
+            client_factory=FakeClient,
+            build_mail_func=mail_for_call,
+            editorial_rewrite_func=lambda result, config: (payload, "raw llm"),
+        )
+        self.assertEqual(metadata["editorial_retry_count"], 1)
+        self.assertEqual(metadata["editorial_output_validation_status"], "ok")
+        self.assertIsNone(metadata["editorial_output_invalid_reason"])
+        self.assertTrue(metadata["editorial_citation_numbers_normalized"])
+        self.assertEqual(metadata["editorial_declared_citation_count"], 3)
+        self.assertEqual(metadata["editorial_actual_citation_count"], 5)
+        run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(run_json["editorial_retry_count"], 1)
+        self.assertEqual(run_json["editorial_output_validation_status"], "ok")
+        self.assertIn("editorial_output_invalid_reason", run_json)
+        self.assertIsNone(run_json["editorial_output_invalid_reason"])
+        self.assertIn("editorial_citation_numbers_normalized", run_json)
+        self.assertTrue(run_json["editorial_citation_numbers_normalized"])
+        self.assertEqual(run_json["editorial_declared_citation_count"], 3)
+        self.assertEqual(run_json["editorial_actual_citation_count"], 5)
+
+    def test_temporal_safe_result_copy_does_not_mutate_original(self):
+        from editorial_rewrite import temporal_safe_raw_markdown
+
+        result = {
+            "status": "completed",
+            "question": "Q",
+            "answer_markdown": (
+                "Une publication du 20 août 2026 analyse la dématérialisation "
+                "des échanges [10]. Des travaux récents portent sur le sujet [10]."
+            ),
+            "cited_sources": [
+                {
+                    "index": 10,
+                    "title": "Village Justice",
+                    "url": "https://www.village-justice.com/articles/dematerialisation",
+                    "temporal": {
+                        "source_date": "2017-11-15",
+                        "claimed_dates": ["2026-08-20"],
+                        "temporal_status": "mismatch",
+                    },
+                }
+            ],
+        }
+        safe = temporal_safe_result_copy(result)
+        self.assertIsNot(safe, result)
+        self.assertEqual(safe["status"], "completed")
+        self.assertNotIn("20 août 2026", safe["answer_markdown"])
+        self.assertNotIn("récents", safe["answer_markdown"])
+        self.assertIn("[10]", safe["answer_markdown"])
+        self.assertIn("dématérialisation", safe["answer_markdown"])
+        self.assertIn("20 août 2026", result["answer_markdown"])
+        self.assertEqual(
+            safe["answer_markdown"],
+            temporal_safe_raw_markdown(result["answer_markdown"], result["cited_sources"]),
+        )
+
+    def test_editorial_fallback_raw_is_temporal_safe(self):
+        from editorial_rewrite import EditorialOutputValidationError
+
+        custom = result_for("default", answer=(
+            "Une publication du 20 août 2026 analyse la dématérialisation "
+            "des échanges d'expertise [10]. Des travaux récents portent sur le même sujet [10]."
+        ))
+        custom["all_sources"] = [
+            {
+                "index": 10,
+                "title": "Village Justice",
+                "url": "https://www.village-justice.com/articles/dematerialisation",
+                "temporal": {
+                    "source_date": "2017-11-15",
+                    "claimed_dates": ["2026-08-20"],
+                    "temporal_status": "mismatch",
+                },
+            }
+        ]
+        custom["cited_sources"] = custom["all_sources"]
+        FakeClient.results = [custom]
+
+        captured = {}
+
+        def recording_mail(result, subject=None, editorial=None, display_title=None):
+            captured["result"] = result
+            return mail_for_call(result, subject=subject, editorial=editorial, display_title=display_title)
+
+        def rewriter(result, config):
+            raise EditorialOutputValidationError(
+                "Editorial body_markdown too short.",
+                reason="body_too_short",
+                retry_count=1,
+            )
+
+        run_dir, metadata = run_job(
+            self.job_path,
+            dry_run=True,
+            output_root=self.output_root,
+            client_factory=FakeClient,
+            build_mail_func=recording_mail,
+            editorial_rewrite_func=rewriter,
+        )
+        self.assertEqual(metadata["editorial_status"], "fallback_raw")
+        self.assertEqual(metadata["editorial_retry_count"], 1)
+        self.assertTrue((run_dir / "raw_mail.txt").exists())
+        self.assertFalse((run_dir / "editorial_mail.txt").exists())
+        raw_answer = captured["result"].get("answer_markdown", "")
+        self.assertNotIn("20 août 2026", raw_answer)
+        self.assertNotIn("récents", raw_answer)
+        self.assertIn("[10]", raw_answer)
+        self.assertIn("dématérialisation", raw_answer)
+
+    def test_run_json_records_validation_error_on_fallback_raw(self):
+        from editorial_rewrite import EditorialOutputValidationError
+
+        def rewriter(result, config):
+            raise EditorialOutputValidationError(
+                "Editorial body_markdown too short.",
+                reason="body_too_short",
+                retry_count=1,
+            )
+
+        run_dir, metadata = run_job(
+            self.job_path,
+            dry_run=True,
+            output_root=self.output_root,
+            client_factory=FakeClient,
+            build_mail_func=mail_for_call,
+            editorial_rewrite_func=rewriter,
+        )
+        self.assertEqual(metadata["editorial_status"], "fallback_raw")
+        self.assertEqual(metadata["editorial_retry_count"], 1)
+        self.assertEqual(metadata["editorial_output_validation_status"], "invalid")
+        self.assertEqual(metadata["editorial_output_invalid_reason"], "body_too_short")
+        self.assertTrue((run_dir / "raw_mail.txt").exists())
+        self.assertFalse((run_dir / "editorial_mail.txt").exists())
 
 
 if __name__ == "__main__":
