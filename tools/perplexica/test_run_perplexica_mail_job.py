@@ -890,6 +890,7 @@ class RunPerplexicaMailJobTests(unittest.TestCase):
         payload["editorial_citation_numbers_normalized"] = True
         payload["editorial_declared_citation_count"] = 3
         payload["editorial_actual_citation_count"] = 5
+        payload["editorial_declared_unused_citation_count"] = 2
 
         run_dir, metadata = run_job(
             self.job_path,
@@ -905,6 +906,7 @@ class RunPerplexicaMailJobTests(unittest.TestCase):
         self.assertTrue(metadata["editorial_citation_numbers_normalized"])
         self.assertEqual(metadata["editorial_declared_citation_count"], 3)
         self.assertEqual(metadata["editorial_actual_citation_count"], 5)
+        self.assertEqual(metadata["editorial_declared_unused_citation_count"], 2)
         run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(run_json["editorial_retry_count"], 1)
         self.assertEqual(run_json["editorial_output_validation_status"], "ok")
@@ -914,6 +916,7 @@ class RunPerplexicaMailJobTests(unittest.TestCase):
         self.assertTrue(run_json["editorial_citation_numbers_normalized"])
         self.assertEqual(run_json["editorial_declared_citation_count"], 3)
         self.assertEqual(run_json["editorial_actual_citation_count"], 5)
+        self.assertEqual(run_json["editorial_declared_unused_citation_count"], 2)
 
     def test_temporal_safe_result_copy_does_not_mutate_original(self):
         from editorial_rewrite import temporal_safe_raw_markdown

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import re
 import sys
@@ -543,6 +544,7 @@ def build_run_metadata(
     editorial_citation_numbers_normalized: bool | None = None,
     editorial_declared_citation_count: int | None = None,
     editorial_actual_citation_count: int | None = None,
+    editorial_declared_unused_citation_count: int | None = None,
     editorial_mail_built: bool = False,
     editorial_mail_sent: bool = False,
 ) -> dict[str, Any]:
@@ -579,6 +581,7 @@ def build_run_metadata(
         metadata["editorial_citation_numbers_normalized"] = editorial_citation_numbers_normalized
         metadata["editorial_declared_citation_count"] = editorial_declared_citation_count
         metadata["editorial_actual_citation_count"] = editorial_actual_citation_count
+        metadata["editorial_declared_unused_citation_count"] = editorial_declared_unused_citation_count
     for key in ("searches", "search_count", "completed_search_count", "empty_search_count", "failed_search_count"):
         if key in result:
             metadata[key] = result[key]
@@ -704,6 +707,29 @@ def default_smtp_config():
     return smtp_config_from_env_and_args(args)
 
 
+def _call_editorial_rewrite(
+    editorial_rewrite_func: Callable[..., tuple[dict[str, Any], str]],
+    result: dict[str, Any],
+    editorial_config: EditorialConfig,
+    diagnostics_dir: Path,
+) -> tuple[dict[str, Any], str]:
+    try:
+        signature = inspect.signature(editorial_rewrite_func)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None:
+        has_var_kw = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
+        if "diagnostics_dir" in signature.parameters or has_var_kw:
+            return editorial_rewrite_func(
+                result,
+                editorial_config,
+                diagnostics_dir=diagnostics_dir,
+            )
+    return editorial_rewrite_func(result, editorial_config)
+
 def run_job(
     job_path: Path,
     *,
@@ -736,6 +762,7 @@ def run_job(
     editorial_citation_numbers_normalized = None
     editorial_declared_citation_count = None
     editorial_actual_citation_count = None
+    editorial_declared_unused_citation_count = None
     editorial_mail_built = False
     editorial_mail_sent = False
     result: dict[str, Any] | None = None
@@ -766,6 +793,7 @@ def run_job(
             editorial_citation_numbers_normalized=editorial_citation_numbers_normalized,
             editorial_declared_citation_count=editorial_declared_citation_count,
             editorial_actual_citation_count=editorial_actual_citation_count,
+            editorial_declared_unused_citation_count=editorial_declared_unused_citation_count,
             editorial_mail_built=editorial_mail_built,
             editorial_mail_sent=editorial_mail_sent,
         )
@@ -826,7 +854,12 @@ def run_job(
         try:
             editorial_config = editorial_config_from_job(job_path, job)
             editorial_model = editorial_config.model
-            editorial_result, editorial_raw = editorial_rewrite_func(result, editorial_config)
+            editorial_result, editorial_raw = _call_editorial_rewrite(
+                editorial_rewrite_func,
+                result,
+                editorial_config,
+                run_dir / "diagnostics",
+            )
             write_editorial_outputs(run_dir, editorial_result, editorial_raw)
             editorial_status = "completed"
             editorial_temporal_violation_count = (editorial_result or {}).get(
@@ -848,6 +881,9 @@ def run_job(
             )
             editorial_actual_citation_count = (editorial_result or {}).get(
                 "editorial_actual_citation_count"
+            )
+            editorial_declared_unused_citation_count = (editorial_result or {}).get(
+                "editorial_declared_unused_citation_count"
             )
         except EditorialTemporalViolationError as exc:
             editorial_status = "fallback_raw"

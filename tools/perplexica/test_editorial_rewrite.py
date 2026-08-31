@@ -763,17 +763,20 @@ class EditorialOutputValidationTests(unittest.TestCase):
         self.assertEqual(stats["declared_count"], 1)
         self.assertEqual(stats["actual_count"], 2)
 
-    def test_declared_citations_absent_from_body_without_extra_rejected(self):
+    def test_declared_superset_of_body_is_accepted_and_normalized(self):
         editorial = {
             "title": "Note",
             "body_markdown": "Corps de la note [1].",
             "citation_numbers": [1, 3],
         }
-        with self.assertRaises(EditorialOutputValidationError) as ctx:
-            validate_editorial_output(
-                editorial, allowed_numbers=[1, 3], min_body_chars=None
-            )
-        self.assertEqual(ctx.exception.reason, "citations_inconsistent")
+        stats = validate_editorial_output(
+            editorial, allowed_numbers=[1, 3], min_body_chars=None
+        )
+        self.assertEqual(editorial["citation_numbers"], [1])
+        self.assertTrue(stats["normalized"])
+        self.assertEqual(stats["declared_count"], 2)
+        self.assertEqual(stats["actual_count"], 1)
+        self.assertEqual(stats["declared_unused_count"], 1)
 
     def test_order_mismatch_normalized_to_body_order(self):
         editorial = {
@@ -787,17 +790,18 @@ class EditorialOutputValidationTests(unittest.TestCase):
         self.assertEqual(editorial["citation_numbers"], [1, 3])
         self.assertTrue(stats["normalized"])
 
-    def test_out_of_range_declared_citation_rejected(self):
+    def test_declared_out_of_range_absent_from_body_is_ignored(self):
         editorial = {
             "title": "Note",
             "body_markdown": "Corps de la note [1].",
-            "citation_numbers": [99],
+            "citation_numbers": [1, 99],
         }
-        with self.assertRaises(EditorialOutputValidationError) as ctx:
-            validate_editorial_output(
-                editorial, allowed_numbers=[1, 3], min_body_chars=None
-            )
-        self.assertEqual(ctx.exception.reason, "invented_citation")
+        stats = validate_editorial_output(
+            editorial, allowed_numbers=[1, 3], min_body_chars=None
+        )
+        self.assertEqual(editorial["citation_numbers"], [1])
+        self.assertTrue(stats["normalized"])
+        self.assertEqual(stats["declared_unused_count"], 1)
 
     def test_invented_citation_rejected(self):
         editorial = {
@@ -912,6 +916,97 @@ class EditorialOutputValidationTests(unittest.TestCase):
         self.assertEqual(editorial["editorial_actual_citation_count"], 2)
         self.assertEqual(len(calls), 1)
 
+    def test_run_20260831_style_declared_all_valid_body_subset_is_accepted(self):
+        actual = [5, 6, 10, 14, 23, 26, 28, 29, 35, 42, 59, 60]
+        editorial = {
+            "title": "Note",
+            "body_markdown": long_editorial_body(actual, 2000),
+            "citation_numbers": list(range(1, 62)),
+        }
+        stats = validate_editorial_output(
+            editorial, allowed_numbers=list(range(1, 62)), min_body_chars=2000
+        )
+        self.assertEqual(editorial["citation_numbers"], actual)
+        self.assertTrue(stats["normalized"])
+        self.assertEqual(stats["declared_count"], 61)
+        self.assertEqual(stats["actual_count"], len(actual))
+        self.assertEqual(stats["declared_unused_count"], 49)
+
+    def test_declared_subset_of_valid_body_is_accepted_and_normalized(self):
+        editorial = {
+            "title": "Note",
+            "body_markdown": "Corps de la note [1] [3].",
+            "citation_numbers": [1],
+        }
+        stats = validate_editorial_output(
+            editorial, allowed_numbers=[1, 3], min_body_chars=None
+        )
+        self.assertEqual(editorial["citation_numbers"], [1, 3])
+        self.assertTrue(stats["normalized"])
+        self.assertEqual(stats["declared_count"], 1)
+        self.assertEqual(stats["actual_count"], 2)
+
+    def test_body_without_citation_is_accepted_as_empty_canonical_citations(self):
+        editorial = {
+            "title": "Note",
+            "body_markdown": "Corps de la note sans citation.",
+            "citation_numbers": [1, 3],
+        }
+        stats = validate_editorial_output(
+            editorial, allowed_numbers=[1, 3], min_body_chars=None
+        )
+        self.assertEqual(editorial["citation_numbers"], [])
+        self.assertTrue(stats["normalized"])
+        self.assertEqual(stats["actual_count"], 0)
+
+    def test_diagnostics_written_for_rejected_attempt_only(self):
+        first = json.dumps(sectioned_editorial(), ensure_ascii=False)
+        second = json.dumps(
+            {
+                "title": "Note",
+                "body_markdown": long_editorial_body([1, 3], 2000),
+                "citation_numbers": [1, 3],
+            },
+            ensure_ascii=False,
+        )
+        llm, _ = counting_llm([first, second])
+        with tempfile.TemporaryDirectory() as tmp:
+            diagnostics = Path(tmp) / "diagnostics"
+            editorial, _ = rewrite_editorial(
+                canonical_result(),
+                self.make_config(tmp),
+                llm_func=llm,
+                diagnostics_dir=diagnostics,
+            )
+            self.assertEqual(editorial["editorial_retry_count"], 1)
+            self.assertTrue((diagnostics / "editorial_attempt_1_raw.txt").exists())
+            self.assertTrue((diagnostics / "editorial_attempt_1_error.json").exists())
+            self.assertFalse((diagnostics / "editorial_attempt_2_raw.txt").exists())
+            error = json.loads((diagnostics / "editorial_attempt_1_error.json").read_text(encoding="utf-8"))
+        self.assertEqual(error["reason"], "unexpected_sectioned_output")
+        self.assertEqual(error["declared_citations"], [1])
+        self.assertEqual(error["actual_citations"], [1])
+        self.assertIsNone(error["temporal_violation_count"])
+
+    def test_diagnostics_not_written_for_valid_output(self):
+        raw = json.dumps(
+            {
+                "title": "Note",
+                "body_markdown": long_editorial_body([1, 3], 2000),
+                "citation_numbers": [1, 3],
+            },
+            ensure_ascii=False,
+        )
+        llm, _ = counting_llm([raw])
+        with tempfile.TemporaryDirectory() as tmp:
+            diagnostics = Path(tmp) / "diagnostics"
+            rewrite_editorial(
+                canonical_result(),
+                self.make_config(tmp),
+                llm_func=llm,
+                diagnostics_dir=diagnostics,
+            )
+            self.assertFalse(diagnostics.exists())
     def test_reinforce_editorial_prompt_appends_structure_instruction(self):
         prompt = "Consignes éditoriales."
         reinforced = reinforce_editorial_prompt(prompt)

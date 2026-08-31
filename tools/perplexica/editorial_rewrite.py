@@ -812,31 +812,14 @@ def validate_editorial_output(
         for number in (editorial.get("citation_numbers") or [])
         if isinstance(number, int) and number > 0
     ]
-    declared_unknown = [number for number in declared if number not in allowed]
-    if declared_unknown:
-        raise EditorialOutputValidationError(
-            "Editorial JSON declares unknown citations: {}".format(declared_unknown),
-            "invented_citation",
-        )
-    missing = sorted(set(declared) - set(detected))
-    extra = sorted(set(detected) - set(declared))
-    normalized = False
-    if missing and not extra:
-        raise EditorialOutputValidationError(
-            "Editorial citation_numbers declare citations absent from the body "
-            "with no body citation left undeclared (declared_missing={}).".format(
-                missing
-            ),
-            "citations_inconsistent",
-        )
     declared_order = list(dict.fromkeys(declared))
-    if detected != declared_order:
-        normalized = True
+    normalized = detected != declared_order
     editorial["citation_numbers"] = detected
     return {
         "normalized": normalized,
         "declared_count": len(declared),
         "actual_count": len(detected),
+        "declared_unused_count": len(set(declared) - set(detected)),
     }
 
 
@@ -894,6 +877,7 @@ def build_editorial_result(
     citation_numbers_normalized: bool | None = None,
     declared_citation_count: int | None = None,
     actual_citation_count: int | None = None,
+    declared_unused_citation_count: int | None = None,
 ) -> dict[str, Any]:
     return {
         "status": "completed",
@@ -912,14 +896,64 @@ def build_editorial_result(
         "editorial_citation_numbers_normalized": citation_numbers_normalized,
         "editorial_declared_citation_count": declared_citation_count,
         "editorial_actual_citation_count": actual_citation_count,
+        "editorial_declared_unused_citation_count": declared_unused_citation_count,
     }
 
+
+def _editorial_attempt_diagnostic(
+    *,
+    attempt_number: int,
+    raw_text: str,
+    reason: str,
+    error: str,
+    editorial: dict[str, Any] | None,
+    temporal_violation_count: int | None = None,
+) -> dict[str, Any]:
+    body = editorial.get("body_markdown") if isinstance(editorial, dict) else None
+    declared = []
+    if isinstance(editorial, dict):
+        declared = [
+            number
+            for number in (editorial.get("citation_numbers") or [])
+            if isinstance(number, int) and number > 0
+        ]
+    actual = extract_citation_numbers(body or "")
+    return {
+        "attempt": attempt_number,
+        "reason": reason,
+        "error": error,
+        "declared_citations": declared,
+        "actual_citations": actual,
+        "body_length": len(body) if isinstance(body, str) else None,
+        "temporal_violation_count": temporal_violation_count,
+        "raw_length": len(raw_text or ""),
+    }
+
+
+def _write_editorial_attempt_diagnostic(
+    diagnostics_dir: Path | None,
+    attempt_number: int,
+    raw_text: str,
+    payload: dict[str, Any],
+) -> None:
+    if diagnostics_dir is None:
+        return
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    (diagnostics_dir / f"editorial_attempt_{attempt_number}_raw.txt").write_text(
+        raw_text or "",
+        encoding="utf-8",
+    )
+    (diagnostics_dir / f"editorial_attempt_{attempt_number}_error.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 def rewrite_editorial(
     canonical_result: dict[str, Any],
     config: EditorialConfig,
     *,
     llm_func=call_editorial_llm,
+    diagnostics_dir: Path | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Rewrite the editorial answer with a single controlled retry.
 
@@ -935,7 +969,9 @@ def rewrite_editorial(
         prompt = reinforce_editorial_prompt(system_prompt) if retry_count else system_prompt
         messages = build_messages(prompt, editorial_input)
         raw_text = llm_func(config, messages)
+        attempt_number = retry_count + 1
         citation_stats: dict[str, Any] | None = None
+        editorial: dict[str, Any] | None = None
         try:
             editorial = parse_editorial_output(raw_text)
             citation_stats = validate_editorial_output(
@@ -957,12 +993,37 @@ def rewrite_editorial(
                     violations,
                 )
         except EditorialTemporalViolationError as exc:
+            _write_editorial_attempt_diagnostic(
+                diagnostics_dir,
+                attempt_number,
+                raw_text,
+                _editorial_attempt_diagnostic(
+                    attempt_number=attempt_number,
+                    raw_text=raw_text,
+                    reason=exc.reason,
+                    error=str(exc),
+                    editorial=editorial,
+                    temporal_violation_count=exc.violation_count,
+                ),
+            )
             if retry_count >= 1:
                 exc.retry_count = retry_count
                 raise
             retry_count += 1
             continue
         except EditorialOutputValidationError as exc:
+            _write_editorial_attempt_diagnostic(
+                diagnostics_dir,
+                attempt_number,
+                raw_text,
+                _editorial_attempt_diagnostic(
+                    attempt_number=attempt_number,
+                    raw_text=raw_text,
+                    reason=exc.reason,
+                    error=str(exc),
+                    editorial=editorial,
+                ),
+            )
             if retry_count >= 1:
                 exc.retry_count = retry_count
                 raise
@@ -971,6 +1032,18 @@ def rewrite_editorial(
         except EditorialRewriteError as exc:
             wrapped = EditorialOutputValidationError(
                 str(exc), reason="invalid_json", retry_count=retry_count
+            )
+            _write_editorial_attempt_diagnostic(
+                diagnostics_dir,
+                attempt_number,
+                raw_text,
+                _editorial_attempt_diagnostic(
+                    attempt_number=attempt_number,
+                    raw_text=raw_text,
+                    reason=wrapped.reason,
+                    error=str(wrapped),
+                    editorial=editorial,
+                ),
             )
             if retry_count >= 1:
                 raise wrapped
@@ -995,6 +1068,9 @@ def rewrite_editorial(
                 actual_citation_count=(
                     citation_stats or {}
                 ).get("actual_count"),
+                declared_unused_citation_count=(
+                    citation_stats or {}
+                ).get("declared_unused_count"),
             ),
             raw_text,
         )
