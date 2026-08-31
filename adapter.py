@@ -256,6 +256,11 @@ DEFAULT_LOCAL_N_CTX = 4096  # ou 8192 si votre modèle le supporte
 DEFAULT_LOCAL_MAX_TOKENS = 1024  # valeur par défaut si /model_info ne précise rien
 DEFAULT_LOCAL_MARGE_TOKENS = 128 # valeur par défaut
 DEFAULT_LOCAL_MIN_PROMPT_TOKENS = 512 # valeur par défaut
+# Temperature appliquee uniquement quand le client n’en fournit aucune.
+# (0.0 reste 0.0 : on teste `is None`, pas la faussete.)
+DEFAULT_LOCAL_TEMPERATURE = 0.4
+# Nombre de chunks de retrieval memoire demandes au backend Flask.
+DEFAULT_RETRIEVAL_TOP_K = 4
 
 # Ping throttling
 _last_ping_ok_ts = 0.0
@@ -2636,6 +2641,7 @@ async def _local_chat(
     conversation_id: str | None = None,
     messages: list[dict] | None = None,
     use_memory: bool = False,
+    max_tokens: int | None = None,
 ) -> str:
     if not await _ensure_local_ready():
         raise HTTPException(status_code=502, detail="Local LLM unreachable after WOL attempt")
@@ -2649,11 +2655,14 @@ async def _local_chat(
     reg = MODEL_REGISTRY.get(route_hint, {}) if isinstance(MODEL_REGISTRY, dict) else {}
     real_model = reg.get("model") or MODEL_ALIAS.get(route_hint, route_hint)
 
+    # temperature: distinguer None de 0.0 (0.0 est une valeur valide, pas une absence)
+    effective_temperature = DEFAULT_LOCAL_TEMPERATURE if temperature is None else temperature
+
     payload = {
         "prompt": prompt,
         "model": real_model,
         "model_name": real_model,
-        "temperature": (temperature or 0.4),
+        "temperature": effective_temperature,
     }
     payload.update(meta)
 
@@ -2669,8 +2678,20 @@ async def _local_chat(
     elif use_memory:
         payload.setdefault("memory_id", str(meta.get("memory_id") or "default"))
 
-    # réglages
-    payload.setdefault("top_k", int(meta.get("top_k") or 4))
+    # Reglage de recherche memoire; ne pas ecraser le top_k de sampling LLM.
+    # Nom canonique envoye au backend: retrieval_top_k.
+    # Ordre de resolution: retrieval_top_k -> memory_top_k -> ancien top_k -> defaut.
+    retrieval_top_k = int(
+        meta.get("retrieval_top_k")
+        or meta.get("memory_top_k")
+        or meta.get("top_k")
+        or DEFAULT_RETRIEVAL_TOP_K
+    )
+    payload["retrieval_top_k"] = retrieval_top_k
+    # Un seul champ de retrieval canonique part vers Flask:
+    # on retire les alias ambigus/transitoires apres resolution.
+    payload.pop("top_k", None)
+    payload.pop("memory_top_k", None)
 
     memory_turns = int(meta.get("memory_turns") or meta.get("n_turns") or 8)
 
@@ -2679,6 +2700,18 @@ async def _local_chat(
         if mem:
             payload["memory_append"] = mem
         payload.setdefault("memory_turns", memory_turns)
+
+    # max_tokens: transmis uniquement si le client l’a demande explicitement.
+    # Sinon on n’injecte rien et Flask applique sa configuration modele.
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
+    else:
+        payload.pop("max_tokens", None)
+
+    # stop: jamais de stop=None explicite. Le champ est omis s’il est absent,
+    # et retire s’il arrive a None via metadata.
+    if payload.get("stop") is None:
+        payload.pop("stop", None)
 
 
     headers = _llm_headers()
@@ -2708,9 +2741,23 @@ async def _local_chat(
 
         payload["prompt"] = msg
 
+        memory_append = payload.get("memory_append") or ""
         log.info(
-            "[adapter][_local_chat] to_flask app_id=%s conv_id=%s memory_id=%s use_memory=%s",
-            payload.get("app_id"), payload.get("conversation_id"), payload.get("memory_id"), use_memory
+            "[adapter][_local_chat] to_flask path=%s route_hint=%s real_model=%s "
+            "conv_id=%s use_memory=%s retrieval_top_k=%s temperature=%s "
+            "max_tokens=%s stop=%s memory_turns=%s memory_append_lines=%s keys=%s",
+            path,
+            route_hint,
+            real_model,
+            payload.get("conversation_id"),
+            use_memory,
+            payload.get("retrieval_top_k"),
+            payload.get("temperature"),
+            "set" if "max_tokens" in payload else "absent",
+            "set" if "stop" in payload else "absent",
+            payload.get("memory_turns"),
+            (memory_append.count("\n") + 1) if memory_append else 0,
+            sorted(payload.keys()),
         )
 
 
@@ -3213,6 +3260,7 @@ class ChatReq(BaseModel):
     response_format: dict | None = None
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
+    stop: str | list[str] | None = None
     tools: list | None = None
     tool_choice: Any | None = None
     parallel_tool_calls: bool | None = None
@@ -4745,6 +4793,7 @@ async def _chat_completions_stream_generator(
                 conversation_id=conversation_id,
                 messages=stream_messages,
                 use_memory=bool(conversation_id),
+                max_tokens=max_tokens_override,
             )
             async for event in emit_synthetic_text(str(text)):
                 yield event
@@ -4906,7 +4955,13 @@ async def chat_completions(
 
 
 
-    max_tokens_override = getattr(req, "max_tokens", None) or getattr(req, "max_completion_tokens", None)
+    # max_completion_tokens est prioritaire (contrat OpenAI recent).
+    # `or` est evite : 0 est une valeur legitime et ne doit pas etre ecrasee.
+    _req_max_tokens = getattr(req, "max_tokens", None)
+    _req_max_completion = getattr(req, "max_completion_tokens", None)
+    max_tokens_override = (
+        _req_max_completion if _req_max_completion is not None else _req_max_tokens
+    )
 
     if req.stream:
         if not messages:
@@ -5276,6 +5331,10 @@ async def chat_completions(
 
             meta.setdefault("memory_turns", 6)
 
+            # stop explicite du client : transmis tel quel, jamais force a None.
+            if getattr(req, "stop", None) is not None:
+                meta["stop"] = req.stop
+
             text = await _local_chat(
                 user_prompt,
                 route_hint=model,
@@ -5285,6 +5344,7 @@ async def chat_completions(
                 conversation_id=conv_id,
                 messages=messages,
                 use_memory=use_memory,
+                max_tokens=max_tokens_override,
             )
             content = str(text)
 
