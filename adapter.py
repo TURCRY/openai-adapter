@@ -4565,6 +4565,7 @@ async def _route_text_completion(
             meta=meta,
             messages=messages,
             use_memory=False,
+            max_tokens=max_output_tokens,
         ))
 
     cfg = MODEL_REGISTRY.get(canonical)
@@ -4580,6 +4581,7 @@ async def _route_text_completion(
             meta=meta,
             messages=messages,
             use_memory=False,
+            max_tokens=max_output_tokens,
         ))
 
     if not _is_known_remote_model(requested_model, canonical):
@@ -4761,6 +4763,7 @@ async def _chat_completions_stream_generator(
                 route_hint=canonical_model,
                 temperature=temperature,
                 meta=metadata or {},
+                max_tokens=max_tokens_override,
             )
             async for event in emit_synthetic_text(str(text)):
                 yield event
@@ -5014,6 +5017,7 @@ async def chat_completions(
                     route_hint=canonical,
                     temperature=temperature,
                     meta=meta,
+                    max_tokens=max_tokens_override,
                 )
 
                 if json_mode:
