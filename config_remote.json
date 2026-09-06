@@ -410,8 +410,9 @@
         "z-ai/glm-5.3":  {
             "base_url":  "https://openrouter.ai/api/v1",
             "api_key_env":  "OPENROUTER_API_KEY",
-            "use_responses_api": false,
-            "force_chat": true,
+            "use_responses_api": true,
+            "force_chat": false,
+            "native_responses_provider": true,
 
             "temperature": 0.2,
             "top_p": 0.95,
@@ -442,8 +443,9 @@
         "z-ai/glm-5.3-flash":  {
             "base_url":  "https://openrouter.ai/api/v1",
             "api_key_env":  "OPENROUTER_API_KEY",
-            "use_responses_api": false,
-            "force_chat": true,
+            "use_responses_api": true,
+            "force_chat": false,
+            "native_responses_provider": true,
 
             "temperature": 0.2,
             "top_p": 0.95,
@@ -474,8 +476,9 @@
         "tencent/hy4-preview":  {
             "base_url":  "https://openrouter.ai/api/v1",
             "api_key_env":  "OPENROUTER_API_KEY",
-            "use_responses_api": false,
-            "force_chat": true,
+            "use_responses_api": true,
+            "force_chat": false,
+            "native_responses_provider": true,            
 
             "temperature": 0.2,
             "top_p": 0.95,
@@ -678,8 +681,9 @@
             "base_url": "https://openrouter.ai/api/v1",
             "api_key_env": "OPENROUTER_API_KEY",
 
-            "use_responses_api": false,
-            "force_chat": true,
+            "use_responses_api": true,
+            "force_chat": false,
+            "native_responses_provider": true,
 
             "temperature": 0.2,
             "top_p": 0.95,

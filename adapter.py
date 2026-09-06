@@ -78,6 +78,7 @@ LOCAL_ROUTE_MAP = {
     "annoter_segments_local": "/annoter_segments",
     "pass3e_local": "/chat_orchestre",
     "pass3e_local_alt": "/chat_orchestre",
+    "pass2f_local": "/chat_orchestre",
 
     # RAG
     "annoter_rag": "/annoter_rag",
@@ -167,6 +168,16 @@ PREFER_LOCAL_EMBEDDINGS = os.getenv("PREFER_LOCAL_EMBEDDINGS", "1") == "1"
 ALLOW_REMOTE_EMBEDDINGS = os.getenv("ALLOW_REMOTE_EMBEDDINGS", "0") == "1"
 # (conserve EMBEDDINGS_MODEL, FALLBACK_LOCAL_EMBEDDINGS_MODEL, FALLBACK_EMBEDDINGS_MODEL,
 #  REMOTE_BASE/REMOTE_API_KEY/TIMEOUT_LOCAL/TIMEOUT_REMOTE déjà présents)
+
+EMBEDDING_MODEL_MAP = {
+    "BAAI/bge-m3": "BGE_M3",
+    "local-embed": "Nomic_Embed",
+}
+
+ALLOWED_EMBEDDING_MODELS = set(EMBEDDING_MODEL_MAP)
+
+
+
 
 # RAG (délégué au Flask)
 RAG_MODE = os.getenv("RAG_MODE", "off")   # off|always|on_tool
@@ -491,6 +502,11 @@ MODEL_REGISTRY = {
         "api_base": "https://api.openai.com/v1",
         "api_key_env": "OPENAI_API_KEY",
         "model": "gpt-4.1-mini",
+        "json_mode": True,
+    },
+    "pass2f_local": {
+        "backend": "gpt4all",
+        "model": "Gemma_4_12B_It_Q4_K_M",
         "json_mode": True,
     },
     # un modèle remote_model spécialisé JSON
@@ -5499,13 +5515,39 @@ async def documents_analyze(
 # -----------------------------------------------------------------------------
 
 # ---- remplace entièrement _embed par ceci ----
-async def _embed(texts: list[str]) -> list[list[float]]:
+async def _embed(
+    texts: list[str],
+    requested_model: str | None = None,
+) -> list[list[float]]:
     if isinstance(texts, str):
         texts = [texts]
     if not texts:
         raise HTTPException(400, "No texts provided for embeddings")
 
-    model_local_primary  = EMBEDDINGS_MODEL                     # ex: "Nomic_Embed"
+
+    requested = (requested_model or "").strip() # ex: "Nomic_Embed"
+
+    if requested:
+        if requested in ALLOWED_EMBEDDING_MODELS:
+            model_local_primary = EMBEDDING_MODEL_MAP[requested]
+            log.info(
+                "Embedding model requested=%s routed_to=%s",
+                requested,
+                model_local_primary,
+            )
+        else:
+            log.warning(
+                "Embedding model requested but not allowed: %s; fallback to %s",
+                requested,
+                EMBEDDINGS_MODEL,
+            )
+            model_local_primary = EMBEDDINGS_MODEL
+    else:
+        model_local_primary = EMBEDDINGS_MODEL
+
+
+
+
     model_local_fallback = os.getenv("FALLBACK_LOCAL_EMBEDDINGS_MODEL", "").strip()  # ex: "E5_multilingual_large"
     model_remote         = os.getenv("FALLBACK_EMBEDDINGS_MODEL", "").strip()        # ex: "text-embedding-3-small"
 
@@ -5570,7 +5612,10 @@ async def embeddings(req: EmbReq, authorization: t.Annotated[str | None, Header(
     texts = _as_list(req.input)
     # si un model est fourni et présent dans config, on peut l’ignorer ici car on force le local d'abord,
     # ou bien router selon cfg.get("embedding_model") == True (optionnel).
-    vecs = await _embed(texts)
+    vecs = await _embed(
+        texts,
+        requested_model=getattr(req, "model", None),
+    )
     return {"data": [{"embedding": v} for v in vecs]}
 
 # -----------------------------------------------------------------------------
