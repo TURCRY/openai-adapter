@@ -13,8 +13,9 @@ import os
 import smtplib
 import sys
 from dataclasses import dataclass
+from email.headerregistry import Address
 from email.message import EmailMessage
-from email.utils import make_msgid
+from email.utils import make_msgid, parseaddr
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +26,12 @@ ENV_SMTP_USERNAME = "PERPLEXICA_SMTP_USERNAME"
 ENV_SMTP_PASSWORD = "PERPLEXICA_SMTP_PASSWORD"
 ENV_MAIL_FROM = "PERPLEXICA_MAIL_FROM"
 ENV_MAIL_TO = "PERPLEXICA_MAIL_TO"
+ENV_MAIL_FROM_DISPLAY_NAME = "PERPLEXICA_MAIL_FROM_DISPLAY_NAME"
 ENV_SMTP_SECURITY = "PERPLEXICA_SMTP_SECURITY"
 ENV_SMTP_STARTTLS = "PERPLEXICA_SMTP_STARTTLS"
 DEFAULT_SMTP_PORT = 587
 DEFAULT_TIMEOUT_SECONDS = 30
+DEFAULT_MAIL_FROM_DISPLAY_NAME = "NTU-consult"
 DEFAULT_ENV_FILE = Path(__file__).resolve().parent / ".env"
 SMTP_SECURITY_VALUES = {"ssl", "starttls", "none"}
 
@@ -47,6 +50,7 @@ class SMTPConfig:
     to_address: str = ""
     security: str = "starttls"
     timeout: int = DEFAULT_TIMEOUT_SECONDS
+    from_display_name: str = DEFAULT_MAIL_FROM_DISPLAY_NAME
 
     @property
     def recipients(self) -> list[str]:
@@ -133,6 +137,7 @@ def merged_config_values(args: argparse.Namespace) -> dict[str, str | None]:
         ENV_SMTP_PASSWORD: pick(args.smtp_password, ENV_SMTP_PASSWORD),
         ENV_MAIL_FROM: pick(args.from_address, ENV_MAIL_FROM),
         ENV_MAIL_TO: pick(args.to, ENV_MAIL_TO),
+        ENV_MAIL_FROM_DISPLAY_NAME: pick(getattr(args, "from_display_name", None), ENV_MAIL_FROM_DISPLAY_NAME),
         ENV_SMTP_SECURITY: pick(args.smtp_security, ENV_SMTP_SECURITY),
         ENV_SMTP_STARTTLS: pick(args.smtp_starttls, ENV_SMTP_STARTTLS),
     }
@@ -152,6 +157,7 @@ def smtp_config_from_env_and_args(args: argparse.Namespace) -> SMTPConfig:
         to_address=values[ENV_MAIL_TO] or "",
         security=security,
         timeout=args.timeout,
+        from_display_name=(values[ENV_MAIL_FROM_DISPLAY_NAME] or "").strip() or DEFAULT_MAIL_FROM_DISPLAY_NAME,
     )
     validate_smtp_config(config)
     return config
@@ -216,13 +222,23 @@ def load_mail_json(path: Path) -> dict[str, Any]:
     return normalize_mail_payload(payload, input_path=path)
 
 
+def build_from_header(smtp_config: SMTPConfig) -> Address:
+    """Build the From header with a display name, keeping the SMTP address unchanged."""
+    username, domain = parseaddr(smtp_config.from_address)[1].split("@", 1)
+    return Address(
+        display_name=smtp_config.from_display_name,
+        username=username,
+        domain=domain,
+    )
+
+
 def build_email_message(mail: dict[str, Any], smtp_config: SMTPConfig) -> EmailMessage:
     validate_smtp_config(smtp_config)
     normalized = normalize_mail_payload(mail)
     message = EmailMessage()
     message_id = make_msgid()
     message["Subject"] = normalized["subject"]
-    message["From"] = smtp_config.from_address
+    message["From"] = build_from_header(smtp_config)
     message["To"] = ", ".join(smtp_config.recipients)
     message["Message-ID"] = message_id
     message.set_content(normalized["text"], charset="utf-8")
@@ -279,6 +295,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smtp-username", help=f"SMTP username. Overrides {ENV_SMTP_USERNAME}.")
     parser.add_argument("--smtp-password", help=f"SMTP password. Overrides {ENV_SMTP_PASSWORD}.")
     parser.add_argument("--from-address", help=f"From address. Overrides {ENV_MAIL_FROM}.")
+    parser.add_argument(
+        "--from-display-name",
+        help=f"From display name. Overrides {ENV_MAIL_FROM_DISPLAY_NAME}.",
+    )
     parser.add_argument("--to", help=f"Recipient address, comma-separated. Overrides {ENV_MAIL_TO}.")
     parser.add_argument("--smtp-security", choices=sorted(SMTP_SECURITY_VALUES), help=f"Overrides {ENV_SMTP_SECURITY}.")
     parser.add_argument("--smtp-starttls", choices=["true", "false", "1", "0", "yes", "no"])

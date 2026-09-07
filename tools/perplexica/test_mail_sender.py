@@ -12,9 +12,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from mail_sender import (
+    DEFAULT_MAIL_FROM_DISPLAY_NAME,
     MailSendError,
     SMTPConfig,
     build_email_message,
+    build_from_header,
     load_mail_json,
     main,
     parse_env_file,
@@ -54,6 +56,7 @@ class MailSenderTests(unittest.TestCase):
             "smtp_username": None,
             "smtp_password": None,
             "from_address": None,
+            "from_display_name": None,
             "to": None,
             "smtp_security": None,
             "smtp_starttls": None,
@@ -62,6 +65,118 @@ class MailSenderTests(unittest.TestCase):
         }
         values.update(overrides)
         return argparse.Namespace(**values)
+
+    def test_from_header_uses_display_name_with_unchanged_address(self):
+        config = self.sample_config(
+            from_address="appflowy@ntu-consult.com",
+            from_display_name="NTU-consult",
+        )
+        header = build_from_header(config)
+        self.assertEqual(header.addr_spec, "appflowy@ntu-consult.com")
+        self.assertEqual(header.display_name, "NTU-consult")
+        self.assertEqual(str(header), "NTU-consult <appflowy@ntu-consult.com>")
+
+    def test_built_message_from_header_and_encoding(self):
+        config = self.sample_config(
+            from_address="appflowy@ntu-consult.com",
+            from_display_name="NTU-consult",
+            to_address="dest@ntu-consult.com",
+        )
+        mail = {
+            "subject": "Veille \u00e9ditorialis\u00e9e",
+            "text": "Corps texte inchang\u00e9.",
+            "html": "<p>Corps HTML inchang\u00e9.</p>",
+            "metadata": {},
+        }
+        message = build_email_message(mail, config)
+        self.assertIn("appflowy@ntu-consult.com", message["From"])
+        self.assertIn("NTU-consult", message["From"])
+
+        parsed = BytesParser(policy=policy.default).parsebytes(message.as_bytes())
+        self.assertEqual(parsed["From"].addresses[0].display_name, "NTU-consult")
+        self.assertEqual(parsed["From"].addresses[0].addr_spec, "appflowy@ntu-consult.com")
+        self.assertEqual(parsed["To"], "dest@ntu-consult.com")
+        self.assertEqual(parsed["Subject"], "Veille \u00e9ditorialis\u00e9e")
+        self.assertIn("Corps texte inchang", parsed.get_body(preferencelist=("plain",)).get_content())
+        self.assertIn("Corps HTML inchang", parsed.get_body(preferencelist=("html",)).get_content())
+
+    def test_from_header_handles_display_name_already_present(self):
+        config = self.sample_config(
+            from_address="Someone <appflowy@ntu-consult.com>",
+            from_display_name="NTU-consult",
+        )
+        header = build_from_header(config)
+        self.assertEqual(header.addr_spec, "appflowy@ntu-consult.com")
+        self.assertEqual(header.display_name, "NTU-consult")
+
+    def test_envelope_sender_stays_bare_address(self):
+        sent = {}
+
+        class FakeSMTP(smtplib.SMTP):
+            def __init__(self, *args, **kwargs):
+                self.local_hostname = "test"
+
+            def ehlo(self, *args, **kwargs):
+                return (250, b"ok")
+
+            def helo(self, *args, **kwargs):
+                return (250, b"ok")
+
+            def login(self, *args, **kwargs):
+                return (235, b"ok")
+
+            def sendmail(self, from_addr, to_addrs, body, *mail_options, **kwargs):
+                sent["from_addr"] = from_addr
+                sent["to_addrs"] = to_addrs
+                return {}
+
+        config = self.sample_config(
+            from_address="appflowy@ntu-consult.com",
+            from_display_name="NTU-consult",
+            to_address="dest@ntu-consult.com",
+            security="ssl",
+            port=465,
+        )
+        with patch("mail_sender.smtplib.SMTP_SSL", return_value=FakeSMTP()):
+            result = send_mail(self.sample_mail(), config)
+        self.assertEqual(sent["from_addr"], "appflowy@ntu-consult.com")
+        self.assertEqual(sent["to_addrs"], ["dest@ntu-consult.com"])
+        self.assertTrue(result["sent"])
+
+    def test_default_display_name_is_ntu_consult(self):
+        self.assertEqual(DEFAULT_MAIL_FROM_DISPLAY_NAME, "NTU-consult")
+        self.assertEqual(SMTPConfig(host="h").from_display_name, "NTU-consult")
+
+    def test_from_display_name_from_env_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text(
+                "PERPLEXICA_SMTP_HOST=smtp.test\n"
+                "PERPLEXICA_MAIL_FROM=appflowy@ntu-consult.com\n"
+                "PERPLEXICA_MAIL_FROM_DISPLAY_NAME=NTU-consult\n"
+                "PERPLEXICA_MAIL_TO=to@test\n",
+                encoding="utf-8",
+            )
+            args = self.empty_args(env_file=path)
+            with patch.dict(os.environ, {}, clear=True):
+                config = smtp_config_from_env_and_args(args)
+        self.assertEqual(config.from_address, "appflowy@ntu-consult.com")
+        self.assertEqual(config.from_display_name, "NTU-consult")
+
+    def test_from_display_name_cli_overrides_env(self):
+        args = self.empty_args(
+            smtp_host="smtp.test",
+            from_address="appflowy@ntu-consult.com",
+            to="to@test",
+            from_display_name="Autre Nom",
+        )
+        with patch.dict(
+            os.environ,
+            {"PERPLEXICA_MAIL_FROM_DISPLAY_NAME": "NTU-consult"},
+            clear=True,
+        ):
+            config = smtp_config_from_env_and_args(args)
+        self.assertEqual(config.from_display_name, "Autre Nom")
 
     def test_builds_multipart_text_html_message(self):
         message = build_email_message(self.sample_mail(), self.sample_config())
