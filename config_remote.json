@@ -68,6 +68,8 @@
         "gpt-4.1-nano":  {
             "use_responses_api":  false,
             "force_chat":  true,
+            "max_tokens":  16384,
+            "context_window":  1047576,
             "pricing":  {
                 "currency":  "USD",
                 "unit":  "per_1m_tokens",
@@ -94,6 +96,8 @@
         "gpt-4.1":  {
             "use_responses_api":  true,
             "force_chat":  false,
+            "max_tokens":  16384,
+            "context_window":  1047576,
             "pricing":  {
                 "currency":  "USD",
                 "unit":  "per_1m_tokens",
@@ -107,6 +111,8 @@
         "gpt-4.1-mini":  {
             "use_responses_api":  true,
             "force_chat":  false,
+            "max_tokens":  16384,
+            "context_window":  1047576,
             "pricing":  {
                 "currency":  "USD",
                 "unit":  "per_1m_tokens",

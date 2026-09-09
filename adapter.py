@@ -2136,6 +2136,11 @@ async def _remote_chat(
     temp = temperature if temperature is not None else cfg.get("temperature")
     top_p = cfg.get("top_p")
     max_tokens = max_tokens_override if max_tokens_override is not None else cfg.get("max_tokens")
+    log.info(
+        "[remote_chat] generation_tokens_final logical=%s physical=%s request_override=%s cfg_max_tokens=%s final_max_tokens=%s use_responses=%s destination=%s",
+        model, provider_model, max_tokens_override, cfg.get("max_tokens"), max_tokens, use_resp,
+        ("max_output_tokens" if use_resp else ("max_completion_tokens" if (prov == "openai" and is_modern) else "max_tokens")),
+    )
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if "openrouter.ai" in base:
