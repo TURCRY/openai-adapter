@@ -174,11 +174,24 @@ class RunPerplexicaMailJobTests(unittest.TestCase):
 
     def test_subject_for_both_variants_preserves_unicode(self):
         base = "Veille expertise et médiation"
-        self.assertEqual(subject_for_variant(base, "raw", "both"), "Veille expertise et médiation — Source Perplexica")
-        self.assertEqual(
-            subject_for_variant(base, "editorial", "both"),
-            "Veille expertise et médiation — Synthèse éditoriale",
-        )
+        expected = {
+            "2026-09-14": (
+                "Veille expertise et médiation — Source Perplexica semaine 38",
+                "Veille expertise et médiation — Synthèse semaine 38",
+            ),
+            "2026-09-21": (
+                "Veille expertise et médiation — Source Perplexica semaine 39",
+                "Veille expertise et médiation — Synthèse semaine 39",
+            ),
+        }
+        for run_date, (raw_subject, editorial_subject) in expected.items():
+            with self.subTest(run_date=run_date, variant="raw"):
+                self.assertEqual(subject_for_variant(base, "raw", "both", run_date), raw_subject)
+            with self.subTest(run_date=run_date, variant="editorial"):
+                self.assertEqual(
+                    subject_for_variant(base, "editorial", "both", run_date),
+                    editorial_subject,
+                )
 
     def test_display_title_is_passed_to_raw_and_editorial_mails(self):
         title = "Veille hebdomadaire — Expertise de justice et médiation"

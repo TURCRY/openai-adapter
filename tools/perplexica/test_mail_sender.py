@@ -69,17 +69,17 @@ class MailSenderTests(unittest.TestCase):
     def test_from_header_uses_display_name_with_unchanged_address(self):
         config = self.sample_config(
             from_address="appflowy@ntu-consult.com",
-            from_display_name="NTU-consult",
+            from_display_name="Nicolas TURCRY",
         )
         header = build_from_header(config)
         self.assertEqual(header.addr_spec, "appflowy@ntu-consult.com")
-        self.assertEqual(header.display_name, "NTU-consult")
-        self.assertEqual(str(header), "NTU-consult <appflowy@ntu-consult.com>")
+        self.assertEqual(header.display_name, "Nicolas TURCRY")
+        self.assertEqual(str(header), "Nicolas TURCRY <appflowy@ntu-consult.com>")
 
     def test_built_message_from_header_and_encoding(self):
         config = self.sample_config(
             from_address="appflowy@ntu-consult.com",
-            from_display_name="NTU-consult",
+            from_display_name="Nicolas TURCRY",
             to_address="dest@ntu-consult.com",
         )
         mail = {
@@ -90,10 +90,10 @@ class MailSenderTests(unittest.TestCase):
         }
         message = build_email_message(mail, config)
         self.assertIn("appflowy@ntu-consult.com", message["From"])
-        self.assertIn("NTU-consult", message["From"])
+        self.assertIn("Nicolas TURCRY", message["From"])
 
         parsed = BytesParser(policy=policy.default).parsebytes(message.as_bytes())
-        self.assertEqual(parsed["From"].addresses[0].display_name, "NTU-consult")
+        self.assertEqual(parsed["From"].addresses[0].display_name, "Nicolas TURCRY")
         self.assertEqual(parsed["From"].addresses[0].addr_spec, "appflowy@ntu-consult.com")
         self.assertEqual(parsed["To"], "dest@ntu-consult.com")
         self.assertEqual(parsed["Subject"], "Veille \u00e9ditorialis\u00e9e")
@@ -103,11 +103,11 @@ class MailSenderTests(unittest.TestCase):
     def test_from_header_handles_display_name_already_present(self):
         config = self.sample_config(
             from_address="Someone <appflowy@ntu-consult.com>",
-            from_display_name="NTU-consult",
+            from_display_name="Nicolas TURCRY",
         )
         header = build_from_header(config)
         self.assertEqual(header.addr_spec, "appflowy@ntu-consult.com")
-        self.assertEqual(header.display_name, "NTU-consult")
+        self.assertEqual(header.display_name, "Nicolas TURCRY")
 
     def test_envelope_sender_stays_bare_address(self):
         sent = {}
@@ -132,7 +132,7 @@ class MailSenderTests(unittest.TestCase):
 
         config = self.sample_config(
             from_address="appflowy@ntu-consult.com",
-            from_display_name="NTU-consult",
+            from_display_name="Nicolas TURCRY",
             to_address="dest@ntu-consult.com",
             security="ssl",
             port=465,
@@ -143,9 +143,9 @@ class MailSenderTests(unittest.TestCase):
         self.assertEqual(sent["to_addrs"], ["dest@ntu-consult.com"])
         self.assertTrue(result["sent"])
 
-    def test_default_display_name_is_ntu_consult(self):
-        self.assertEqual(DEFAULT_MAIL_FROM_DISPLAY_NAME, "NTU-consult")
-        self.assertEqual(SMTPConfig(host="h").from_display_name, "NTU-consult")
+    def test_default_display_name_is_nicolas_turcry(self):
+        self.assertEqual(DEFAULT_MAIL_FROM_DISPLAY_NAME, "Nicolas TURCRY")
+        self.assertEqual(SMTPConfig(host="h").from_display_name, "Nicolas TURCRY")
 
     def test_from_display_name_from_env_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -153,7 +153,7 @@ class MailSenderTests(unittest.TestCase):
             path.write_text(
                 "PERPLEXICA_SMTP_HOST=smtp.test\n"
                 "PERPLEXICA_MAIL_FROM=appflowy@ntu-consult.com\n"
-                "PERPLEXICA_MAIL_FROM_DISPLAY_NAME=NTU-consult\n"
+                "PERPLEXICA_MAIL_FROM_DISPLAY_NAME=Nicolas TURCRY\n"
                 "PERPLEXICA_MAIL_TO=to@test\n",
                 encoding="utf-8",
             )
@@ -161,7 +161,7 @@ class MailSenderTests(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True):
                 config = smtp_config_from_env_and_args(args)
         self.assertEqual(config.from_address, "appflowy@ntu-consult.com")
-        self.assertEqual(config.from_display_name, "NTU-consult")
+        self.assertEqual(config.from_display_name, "Nicolas TURCRY")
 
     def test_from_display_name_cli_overrides_env(self):
         args = self.empty_args(
@@ -172,7 +172,7 @@ class MailSenderTests(unittest.TestCase):
         )
         with patch.dict(
             os.environ,
-            {"PERPLEXICA_MAIL_FROM_DISPLAY_NAME": "NTU-consult"},
+            {"PERPLEXICA_MAIL_FROM_DISPLAY_NAME": "Nicolas TURCRY"},
             clear=True,
         ):
             config = smtp_config_from_env_and_args(args)
@@ -192,8 +192,8 @@ class MailSenderTests(unittest.TestCase):
 
     def test_professional_subject_round_trips_after_bytes_serialization(self):
         subjects = [
-            "Veille expertise et m\u00e9diation \u2014 Source Perplexica",
-            "Veille expertise et m\u00e9diation \u2014 Synth\u00e8se \u00e9ditoriale",
+            "Veille expertise et m\u00e9diation \u2014 Source Perplexica semaine 39",
+            "Veille expertise et m\u00e9diation \u2014 Synth\u00e8se semaine 39",
             "\u00e9 \u00e8 \u00e0 \u0153 \u2014 \u2019",
         ]
         for subject in subjects:

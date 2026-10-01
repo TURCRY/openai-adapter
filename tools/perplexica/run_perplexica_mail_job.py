@@ -9,7 +9,7 @@ import json
 import re
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -225,11 +225,19 @@ def editorial_config_from_job(job_path: Path, job: dict[str, Any]) -> EditorialC
     )
 
 
-def subject_for_variant(base_subject: str | None, variant: str, mail_mode: str) -> str | None:
+def subject_for_variant(
+    base_subject: str | None,
+    variant: str,
+    mail_mode: str,
+    run_date: date | datetime | str,
+) -> str | None:
     if mail_mode != "both" or not base_subject:
         return base_subject
-    suffix = "Source Perplexica" if variant == "raw" else "Synthèse éditoriale"
-    return f"{base_subject} — {suffix}"
+    if isinstance(run_date, str):
+        run_date = datetime.fromisoformat(run_date.replace("Z", "+00:00"))
+    week = run_date.isocalendar().week
+    suffix = "Source Perplexica" if variant == "raw" else "Synthèse"
+    return f"{base_subject} — {suffix} semaine {week}"
 
 
 def source_count(result: dict[str, Any] | None) -> int:
@@ -840,7 +848,7 @@ def run_job(
         if mail_mode in {"raw", "both"}:
             raw_mail = build_mail_func(
                 result,
-                subject=subject_for_variant(job.get("subject"), "raw", mail_mode),
+                subject=subject_for_variant(job.get("subject"), "raw", mail_mode, started_at),
                 display_title=display_title,
             )
             write_mail_outputs(run_dir, "raw", raw_mail)
@@ -926,7 +934,7 @@ def run_job(
             if editorial_result is not None:
                 editorial_mail = build_mail_func(
                     result,
-                    subject=subject_for_variant(job.get("subject"), "editorial", mail_mode),
+                    subject=subject_for_variant(job.get("subject"), "editorial", mail_mode, started_at),
                     editorial=editorial_result,
                     display_title=display_title,
                 )
@@ -935,7 +943,7 @@ def run_job(
             else:
                 raw_mail = build_mail_func(
                     temporal_safe_result_copy(result),
-                    subject=subject_for_variant(job.get("subject"), "raw", mail_mode),
+                    subject=subject_for_variant(job.get("subject"), "raw", mail_mode, started_at),
                     display_title=display_title,
                 )
                 write_mail_outputs(run_dir, "raw", raw_mail)
