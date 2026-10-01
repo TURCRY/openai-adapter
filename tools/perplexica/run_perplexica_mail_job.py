@@ -27,6 +27,7 @@ from perplexica_client import DEFAULT_TIMEOUT_SECONDS, PerplexicaClient, Perplex
 
 TOOLS_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_ROOT = TOOLS_DIR / "output" / "jobs"
+DEFAULT_MARKER_DIR = TOOLS_DIR / "output" / "veille_wrapper" / "markers"
 SUCCESS_STATUSES = {"completed", "completed_no_mail"}
 SAFE_JOB_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 MAIL_MODES = {"raw", "editorial", "both"}
@@ -970,29 +971,191 @@ def run_job(
             if editorial_mail is not None:
                 editorial_mail_sent = bool(send_mail_func(editorial_mail, smtp_config, dry_run=False).get("sent"))
     except MailSendError as exc:
-        return run_dir, finish("mail_failed", str(exc))
+        status = "partial" if mail_mode == "both" and raw_mail_sent and not editorial_mail_sent else "mail_failed"
+        return run_dir, finish(status, str(exc))
     except Exception as exc:
-        return run_dir, finish("mail_failed", f"{exc.__class__.__name__}: {exc}")
+        status = "partial" if mail_mode == "both" and raw_mail_sent and not editorial_mail_sent else "mail_failed"
+        return run_dir, finish(status, f"{exc.__class__.__name__}: {exc}")
+
+    if mail_mode == "both" and editorial_requested and raw_mail_sent and not editorial_mail_sent:
+        return run_dir, finish("partial", editorial_fallback_reason or "Editorial mail was not sent.")
 
     expected_sent = raw_mail_sent if mail_mode == "raw" else editorial_mail_sent or raw_mail_sent
     if mail_mode == "both" and editorial_mail_built:
         expected_sent = raw_mail_sent and editorial_mail_sent
     return run_dir, finish("completed" if expected_sent else "mail_failed", None if expected_sent else "SMTP did not confirm send.")
 
+def _run_business_date(metadata: dict[str, Any]) -> str:
+    started_at = str(metadata.get("started_at") or "")
+    try:
+        return datetime.fromisoformat(started_at.replace("Z", "+00:00")).date().isoformat()
+    except ValueError as exc:
+        raise JobRunError("Cannot determine business date for marker promotion.") from exc
+
+
+def promote_recovered_marker(
+    run_dir: Path,
+    metadata: dict[str, Any],
+    *,
+    marker_dir: Path = DEFAULT_MARKER_DIR,
+) -> tuple[Path, Path | None]:
+    """Archive the active partial marker and publish one final ok marker."""
+    marker_dir = Path(marker_dir)
+    business_date = _run_business_date(metadata)
+    run_id = Path(run_dir).name
+    marker_dir.mkdir(parents=True, exist_ok=True)
+
+    active_partial = marker_dir / f"{business_date}.partial"
+    archive_path: Path | None = None
+    if active_partial.exists():
+        try:
+            partial_payload = json.loads(active_partial.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise JobRunError(f"Cannot read partial marker: {active_partial}") from exc
+        marker_run_id = partial_payload.get("run_id")
+        if marker_run_id and marker_run_id != run_id:
+            raise JobRunError(
+                f"Partial marker belongs to another run: {marker_run_id}"
+            )
+        history_dir = marker_dir / "history"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        archived_at = compact_timestamp()
+        archive_path = history_dir / f"{business_date}.partial.{archived_at}.json"
+        active_partial.replace(archive_path)
+
+    ok_marker = marker_dir / f"{business_date}.ok"
+    write_json(
+        ok_marker,
+        {
+            "date": business_date,
+            "created_at": iso_now(),
+            "marker_status": "ok",
+            "status": "completed",
+            "run_status": "completed",
+            "run_id": run_id,
+            "run_dir": str(Path(run_dir)),
+            "mail_sent": True,
+            "raw_mail_sent": True,
+            "editorial_mail_sent": True,
+            "editorial_message_id": metadata.get("editorial_message_id"),
+            "recovered_from": "partial",
+            "archived_partial_marker": str(archive_path) if archive_path else None,
+        },
+    )
+    return ok_marker, archive_path
+
+def resume_editorial_run(
+    job_path: Path,
+    run_dir: Path,
+    *,
+    dry_run: bool = False,
+    build_mail_func: Callable[..., dict[str, Any]] = build_mail,
+    smtp_config_factory: Callable[[], Any] = default_smtp_config,
+    send_mail_func: Callable[..., dict[str, Any]] = send_mail,
+    editorial_rewrite_func: Callable[..., tuple[dict[str, Any], str]] = rewrite_editorial,
+    marker_dir: Path = DEFAULT_MARKER_DIR,
+) -> tuple[Path, dict[str, Any]]:
+    """Resume only editorial generation and delivery for a raw-only run."""
+    job_path = Path(job_path)
+    run_dir = Path(run_dir)
+    job = load_job(job_path)
+    try:
+        metadata = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise JobRunError(f"Cannot load resumable run: {run_dir}") from exc
+    if not isinstance(metadata, dict) or not isinstance(result, dict):
+        raise JobRunError(f"Invalid resumable run: {run_dir}")
+    if job_mail_mode(job) != "both" or not metadata.get("editorial_requested"):
+        raise JobRunError("Editorial resume requires a 'both' run with editorial_requested=true.")
+    if not metadata.get("raw_mail_sent"):
+        raise JobRunError("Editorial resume requires raw_mail_sent=true.")
+    if metadata.get("editorial_mail_sent"):
+        raise JobRunError("Editorial mail is already marked as sent; refusing a duplicate.")
+
+    def persist(status: str, error: str | None) -> tuple[Path, dict[str, Any]]:
+        metadata["finished_at"] = iso_now()
+        metadata["status"] = status
+        metadata["mail_sent"] = bool(metadata.get("raw_mail_sent") or metadata.get("editorial_mail_sent"))
+        metadata["error"] = error
+        write_json(run_dir / "run.json", metadata)
+        return run_dir, metadata
+
+    config = editorial_config_from_job(job_path, job)
+    metadata["editorial_model"] = config.model
+    try:
+        editorial_result, editorial_raw = _call_editorial_rewrite(
+            editorial_rewrite_func,
+            result,
+            config,
+            run_dir / "diagnostics",
+        )
+    except EditorialRewriteError as exc:
+        metadata["editorial_status"] = "fallback_raw"
+        metadata["editorial_fallback_reason"] = str(exc)
+        metadata["editorial_retry_count"] = getattr(exc, "retry_count", 0) or 0
+        metadata["editorial_output_validation_status"] = "invalid"
+        metadata["editorial_output_invalid_reason"] = getattr(exc, "reason", None)
+        return persist("partial", str(exc))
+
+    write_editorial_outputs(run_dir, editorial_result, editorial_raw)
+    metadata["editorial_status"] = "completed"
+    metadata["editorial_fallback_reason"] = None
+    metadata["editorial_retry_count"] = editorial_result.get("editorial_retry_count", 0)
+    metadata["editorial_output_validation_status"] = editorial_result.get(
+        "editorial_output_validation_status"
+    )
+    metadata["editorial_output_invalid_reason"] = editorial_result.get(
+        "editorial_output_invalid_reason"
+    )
+    editorial_mail = build_mail_func(
+        result,
+        subject=subject_for_variant(
+            job.get("subject"), "editorial", "both", metadata.get("started_at") or iso_now()
+        ),
+        editorial=editorial_result,
+        display_title=job.get("display_title"),
+    )
+    write_mail_outputs(run_dir, "editorial", editorial_mail)
+    metadata["editorial_mail_built"] = True
+    if dry_run:
+        return persist("partial", None)
+
+    try:
+        send_result = send_mail_func(editorial_mail, smtp_config_factory(), dry_run=False)
+    except (MailSendError, OSError) as exc:
+        return persist("partial", str(exc))
+    metadata["editorial_mail_sent"] = bool(send_result.get("sent"))
+    metadata["editorial_message_id"] = send_result.get("message_id")
+    if not metadata["editorial_mail_sent"]:
+        return persist("partial", "SMTP did not confirm editorial send.")
+    completed = persist("completed", None)
+    promote_recovered_marker(run_dir, metadata, marker_dir=marker_dir)
+    return completed
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a configured Perplexica mail job.")
     parser.add_argument("--job", type=Path, required=True, help="Path to the job JSON file.")
     parser.add_argument("--dry-run", action="store_true", help="Run Perplexica and build mail, but do not send SMTP.")
     parser.add_argument("--no-mail", action="store_true", help="Override job send_mail=false.")
+    parser.add_argument(
+        "--resume-editorial-run",
+        type=Path,
+        help="Resume only editorial generation and SMTP for an existing partial run.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        run_dir, metadata = run_job(args.job, dry_run=args.dry_run, no_mail=args.no_mail)
-    except JobConfigError as exc:
+        if args.resume_editorial_run is not None:
+            run_dir, metadata = resume_editorial_run(
+                args.job, args.resume_editorial_run, dry_run=args.dry_run
+            )
+        else:
+            run_dir, metadata = run_job(args.job, dry_run=args.dry_run, no_mail=args.no_mail)
+    except (JobConfigError, JobRunError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:

@@ -44,7 +44,7 @@
     "enabled": true,
     "prompt_file": "../prompts/prompt_editorial_veille.md",
     "model": "local-gemma-4",
-    "timeout": 900,
+    "timeout": 1000,
     "min_body_chars": 2000
   }
 }

@@ -16,6 +16,8 @@ from editorial_rewrite import (
     EditorialOutputValidationError,
     EditorialRewriteError,
     EditorialTemporalViolationError,
+    EditorialTransientError,
+    TRANSIENT_RETRY_BACKOFF_SECONDS,
     build_messages,
     call_editorial_llm,
     editorial_config_from_env,
@@ -222,6 +224,37 @@ class EditorialRewriteTests(unittest.TestCase):
             with self.assertRaises(EditorialRewriteError):
                 call_editorial_llm(config, [])
 
+    def test_call_editorial_llm_classifies_retryable_http_statuses(self):
+        config = EditorialConfig(base_url="http://adapter.local", prompt_file=Path("prompt"))
+        for status in (502, 503, 504):
+            with self.subTest(status=status):
+                with patch(
+                    "editorial_rewrite.urlopen",
+                    side_effect=HTTPError("http://adapter.local", status, "boom", {}, None),
+                ):
+                    with self.assertRaises(EditorialTransientError):
+                        call_editorial_llm(config, [])
+
+    def test_call_editorial_llm_does_not_classify_client_errors_as_transient(self):
+        config = EditorialConfig(base_url="http://adapter.local", prompt_file=Path("prompt"))
+        for status in (400, 401, 403):
+            with self.subTest(status=status):
+                with patch(
+                    "editorial_rewrite.urlopen",
+                    side_effect=HTTPError("http://adapter.local", status, "boom", {}, None),
+                ):
+                    with self.assertRaises(EditorialRewriteError) as ctx:
+                        call_editorial_llm(config, [])
+                self.assertNotIsInstance(ctx.exception, EditorialTransientError)
+
+    def test_call_editorial_llm_classifies_timeout_as_transient(self):
+        config = EditorialConfig(
+            base_url="http://adapter.local", prompt_file=Path("prompt"), timeout=1000
+        )
+        with patch("editorial_rewrite.urlopen", side_effect=TimeoutError("timed out")):
+            with self.assertRaises(EditorialTransientError) as ctx:
+                call_editorial_llm(config, [])
+        self.assertIn("1000", str(ctx.exception))
     def test_call_editorial_llm_network_error(self):
         def fake_urlopen(request, timeout):
             raise URLError("offline")
@@ -813,9 +846,8 @@ class EditorialOutputValidationTests(unittest.TestCase):
             validate_editorial_output(editorial, allowed_numbers=[1, 3], min_body_chars=None)
         self.assertEqual(ctx.exception.reason, "invented_citation")
 
-    def test_retry_valid_after_sectioned_output(self):
-        first = json.dumps(sectioned_editorial(), ensure_ascii=False)
-        second = json.dumps(
+    def valid_editorial_raw(self):
+        return json.dumps(
             {
                 "title": "Note",
                 "body_markdown": long_editorial_body([1, 3], 2000),
@@ -823,27 +855,35 @@ class EditorialOutputValidationTests(unittest.TestCase):
             },
             ensure_ascii=False,
         )
-        llm, calls = counting_llm([first, second])
-        with tempfile.TemporaryDirectory() as tmp:
-            editorial, _ = rewrite_editorial(canonical_result(), self.make_config(tmp), llm_func=llm)
-        self.assertEqual(editorial["editorial_retry_count"], 1)
-        self.assertEqual(editorial["editorial_output_validation_status"], "ok")
-        self.assertEqual(len(calls), 2)
-        self.assertIn("Retourne exactement et uniquement les clés", calls[1][0]["content"])
-        self.assertNotIn("Retourne exactement et uniquement les clés", calls[0][0]["content"])
 
-    def test_retry_invalid_propagates_exception(self):
+    def test_validation_error_retries_with_reinforced_prompt_then_succeeds(self):
         first = json.dumps(sectioned_editorial(), ensure_ascii=False)
-        llm, calls = counting_llm([first, first])
+        llm, calls = counting_llm([first, self.valid_editorial_raw()])
         with tempfile.TemporaryDirectory() as tmp:
-            config = self.make_config(tmp)
+            editorial, _ = rewrite_editorial(
+                canonical_result(), self.make_config(tmp), llm_func=llm
+            )
+        self.assertEqual(editorial["status"], "completed")
+        self.assertEqual(editorial["editorial_transport_retry_count"], 0)
+        self.assertEqual(editorial["editorial_validation_retry_count"], 1)
+        self.assertEqual(editorial["editorial_retry_count"], 1)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn(RETRY_STRUCTURE_INSTRUCTION, calls[0][0]["content"])
+        self.assertIn(RETRY_STRUCTURE_INSTRUCTION, calls[1][0]["content"])
+
+    def test_two_invalid_http_200_outputs_exhaust_functional_retry(self):
+        invalid = json.dumps(sectioned_editorial(), ensure_ascii=False)
+        llm, calls = counting_llm([invalid, invalid])
+        with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(EditorialOutputValidationError) as ctx:
-                rewrite_editorial(canonical_result(), config, llm_func=llm)
+                rewrite_editorial(canonical_result(), self.make_config(tmp), llm_func=llm)
         self.assertEqual(ctx.exception.reason, "unexpected_sectioned_output")
+        self.assertEqual(ctx.exception.transport_retry_count, 0)
+        self.assertEqual(ctx.exception.validation_retry_count, 1)
         self.assertEqual(ctx.exception.retry_count, 1)
         self.assertEqual(len(calls), 2)
 
-    def test_temporal_violation_retried_once_then_raises(self):
+    def test_temporal_violation_retries_once_then_fails(self):
         result = canonical_result()
         result["citation_numbers"] = [3, 1, 10]
         result["answer_markdown"] = (
@@ -861,19 +901,115 @@ class EditorialOutputValidationTests(unittest.TestCase):
             with self.assertRaises(EditorialTemporalViolationError) as ctx:
                 rewrite_editorial(result, config, llm_func=llm)
         self.assertEqual(ctx.exception.reason, "temporal_violation")
-        self.assertEqual(ctx.exception.retry_count, 1)
+        self.assertEqual(ctx.exception.validation_retry_count, 1)
         self.assertEqual(ctx.exception.violation_count, 1)
         self.assertEqual(len(calls), 2)
 
-    def test_transport_error_is_not_retried(self):
-        def boom(config, messages):
-            raise EditorialRewriteError("offline")
+    def test_transient_timeout_retries_once_then_succeeds(self):
+        calls = []
+        sleeps = []
+
+        def llm(config, messages):
+            calls.append(messages)
+            if len(calls) == 1:
+                raise EditorialTransientError("Editorial timeout after 1000 seconds.")
+            return self.valid_editorial_raw()
 
         with tempfile.TemporaryDirectory() as tmp:
-            config = self.make_config(tmp)
-            with self.assertRaises(EditorialRewriteError):
-                rewrite_editorial(canonical_result(), config, llm_func=boom)
+            editorial, _ = rewrite_editorial(
+                canonical_result(),
+                self.make_config(tmp),
+                llm_func=llm,
+                sleep_func=sleeps.append,
+            )
+        self.assertEqual(editorial["status"], "completed")
+        self.assertEqual(editorial["editorial_transport_retry_count"], 1)
+        self.assertEqual(editorial["editorial_validation_retry_count"], 0)
+        self.assertEqual(editorial["editorial_retry_count"], 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleeps, [TRANSIENT_RETRY_BACKOFF_SECONDS])
 
+    def test_http_502_retries_once_then_succeeds(self):
+        calls = []
+        sleeps = []
+
+        def llm(config, messages):
+            calls.append(messages)
+            if len(calls) == 1:
+                raise EditorialTransientError("Editorial HTTP error: 502")
+            return self.valid_editorial_raw()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            editorial, _ = rewrite_editorial(
+                canonical_result(), self.make_config(tmp), llm_func=llm,
+                sleep_func=sleeps.append,
+            )
+        self.assertEqual(editorial["editorial_transport_retry_count"], 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleeps, [2])
+
+    def test_transport_and_validation_retry_budgets_are_independent(self):
+        invalid = json.dumps(sectioned_editorial(), ensure_ascii=False)
+        calls = []
+        sleeps = []
+
+        def llm(config, messages):
+            calls.append(messages)
+            if len(calls) == 1:
+                raise EditorialTransientError("Editorial timeout after 1000 seconds.")
+            if len(calls) == 2:
+                return invalid
+            return self.valid_editorial_raw()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            editorial, _ = rewrite_editorial(
+                canonical_result(), self.make_config(tmp), llm_func=llm,
+                sleep_func=sleeps.append,
+            )
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [2])
+        self.assertEqual(editorial["editorial_transport_retry_count"], 1)
+        self.assertEqual(editorial["editorial_validation_retry_count"], 1)
+        self.assertEqual(editorial["editorial_retry_count"], 2)
+        self.assertNotIn(RETRY_STRUCTURE_INSTRUCTION, calls[1][0]["content"])
+        self.assertIn(RETRY_STRUCTURE_INSTRUCTION, calls[2][0]["content"])
+
+    def test_two_transient_failures_stop_after_second_attempt(self):
+        calls = []
+        sleeps = []
+
+        def llm(config, messages):
+            calls.append(messages)
+            raise EditorialTransientError("Editorial HTTP error: 503")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(EditorialTransientError) as ctx:
+                rewrite_editorial(
+                    canonical_result(), self.make_config(tmp), llm_func=llm,
+                    sleep_func=sleeps.append,
+                )
+        self.assertEqual(ctx.exception.transport_retry_count, 1)
+        self.assertEqual(ctx.exception.validation_retry_count, 0)
+        self.assertEqual(ctx.exception.retry_count, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleeps, [TRANSIENT_RETRY_BACKOFF_SECONDS])
+
+    def test_client_transport_errors_are_not_retried(self):
+        for status in (400, 401, 403):
+            with self.subTest(status=status):
+                calls = []
+
+                def boom(config, messages):
+                    calls.append(messages)
+                    raise EditorialRewriteError(f"Editorial HTTP error: {status}")
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    with self.assertRaises(EditorialRewriteError) as ctx:
+                        rewrite_editorial(
+                            canonical_result(), self.make_config(tmp), llm_func=boom
+                        )
+                self.assertEqual(ctx.exception.retry_count, 0)
+                self.assertEqual(len(calls), 1)
     def test_rewrite_editorial_auto_normalizes_citation_numbers(self):
         raw = json.dumps(
             {
@@ -959,35 +1095,29 @@ class EditorialOutputValidationTests(unittest.TestCase):
         self.assertTrue(stats["normalized"])
         self.assertEqual(stats["actual_count"], 0)
 
-    def test_diagnostics_written_for_rejected_attempt_only(self):
+    def test_diagnostics_written_for_both_validation_attempts(self):
         first = json.dumps(sectioned_editorial(), ensure_ascii=False)
-        second = json.dumps(
-            {
-                "title": "Note",
-                "body_markdown": long_editorial_body([1, 3], 2000),
-                "citation_numbers": [1, 3],
-            },
-            ensure_ascii=False,
-        )
-        llm, _ = counting_llm([first, second])
+        llm, calls = counting_llm([first, first])
         with tempfile.TemporaryDirectory() as tmp:
             diagnostics = Path(tmp) / "diagnostics"
-            editorial, _ = rewrite_editorial(
-                canonical_result(),
-                self.make_config(tmp),
-                llm_func=llm,
-                diagnostics_dir=diagnostics,
-            )
-            self.assertEqual(editorial["editorial_retry_count"], 1)
+            with self.assertRaises(EditorialOutputValidationError):
+                rewrite_editorial(
+                    canonical_result(),
+                    self.make_config(tmp),
+                    llm_func=llm,
+                    diagnostics_dir=diagnostics,
+                )
             self.assertTrue((diagnostics / "editorial_attempt_1_raw.txt").exists())
             self.assertTrue((diagnostics / "editorial_attempt_1_error.json").exists())
-            self.assertFalse((diagnostics / "editorial_attempt_2_raw.txt").exists())
-            error = json.loads((diagnostics / "editorial_attempt_1_error.json").read_text(encoding="utf-8"))
+            self.assertTrue((diagnostics / "editorial_attempt_2_raw.txt").exists())
+            error = json.loads(
+                (diagnostics / "editorial_attempt_1_error.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(len(calls), 2)
         self.assertEqual(error["reason"], "unexpected_sectioned_output")
         self.assertEqual(error["declared_citations"], [1])
         self.assertEqual(error["actual_citations"], [1])
         self.assertIsNone(error["temporal_violation_count"])
-
     def test_diagnostics_not_written_for_valid_output(self):
         raw = json.dumps(
             {

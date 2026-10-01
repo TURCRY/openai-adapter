@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -29,6 +30,8 @@ ENV_ADAPTER_API_KEY = "ADAPTER_API_KEY"
 DEFAULT_MODEL = "local-gemma-4"
 DEFAULT_TIMEOUT_SECONDS = 300
 MAX_TIMEOUT_SECONDS = 1800
+TRANSIENT_HTTP_STATUSES = frozenset({502, 503, 504})
+TRANSIENT_RETRY_BACKOFF_SECONDS = 2.0
 DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent / "prompts" / "prompt_editorial_veille.md"
 CITATION_RE = re.compile(r"\[([1-9]\d*)\]")
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
@@ -490,13 +493,21 @@ class EditorialRewriteError(Exception):
     """User-facing editorial rewrite failure."""
 
 
+class EditorialTransientError(EditorialRewriteError):
+    """Transport failure that may be retried once."""
+
+    def __init__(self, message: str, *, retry_count: int = 0):
+        super().__init__(message)
+        self.retry_count = retry_count
+
+
 class EditorialOutputValidationError(EditorialRewriteError):
     """Raised when the parsed editorial JSON is structurally invalid.
 
     ``reason`` carries a stable machine-readable code (e.g.
     body_too_short, unexpected_sectioned_output, citations_inconsistent,
     invented_citation, body_truncated, invalid_json) so the caller can trace
-    why the output was rejected and decide to retry once.
+    why the output was rejected and trigger the single functional retry.
     """
 
     def __init__(
@@ -689,11 +700,16 @@ def call_editorial_llm(config: EditorialConfig, messages: list[dict[str, str]]) 
             status = response.getcode()
             raw_body = response.read()
     except HTTPError as exc:
-        raise EditorialRewriteError(f"Editorial HTTP error: {exc.code}") from exc
+        error = EditorialTransientError if exc.code in TRANSIENT_HTTP_STATUSES else EditorialRewriteError
+        raise error(f"Editorial HTTP error: {exc.code}") from exc
     except URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise EditorialTransientError(
+                f"Editorial network timeout after {config.timeout} seconds."
+            ) from exc
         raise EditorialRewriteError(f"Editorial network error: {exc.reason}") from exc
     except TimeoutError as exc:
-        raise EditorialRewriteError(f"Editorial timeout after {config.timeout} seconds.") from exc
+        raise EditorialTransientError(f"Editorial timeout after {config.timeout} seconds.") from exc
 
     if status < 200 or status >= 300:
         raise EditorialRewriteError(f"Editorial unexpected HTTP status: {status}")
@@ -872,6 +888,8 @@ def build_editorial_result(
     model: str,
     temporal_violation_count: int = 0,
     retry_count: int = 0,
+    transport_retry_count: int = 0,
+    validation_retry_count: int = 0,
     output_validation_status: str = "ok",
     output_invalid_reason: str | None = None,
     citation_numbers_normalized: bool | None = None,
@@ -891,6 +909,8 @@ def build_editorial_result(
         "editorial_temporal_violation_count": temporal_violation_count,
         "temporal_violation_count": temporal_violation_count,
         "editorial_retry_count": retry_count,
+        "editorial_transport_retry_count": transport_retry_count,
+        "editorial_validation_retry_count": validation_retry_count,
         "editorial_output_validation_status": output_validation_status,
         "editorial_output_invalid_reason": output_invalid_reason,
         "editorial_citation_numbers_normalized": citation_numbers_normalized,
@@ -948,30 +968,55 @@ def _write_editorial_attempt_diagnostic(
         encoding="utf-8",
     )
 
+def _set_retry_counts(
+    exc: EditorialRewriteError,
+    transport_retry_count: int,
+    validation_retry_count: int,
+) -> None:
+    exc.transport_retry_count = transport_retry_count
+    exc.validation_retry_count = validation_retry_count
+    exc.retry_count = transport_retry_count + validation_retry_count
+
+
 def rewrite_editorial(
     canonical_result: dict[str, Any],
     config: EditorialConfig,
     *,
     llm_func=call_editorial_llm,
     diagnostics_dir: Path | None = None,
+    sleep_func=time.sleep,
 ) -> tuple[dict[str, Any], str]:
-    """Rewrite the editorial answer with a single controlled retry.
-
-    Transport/config errors (raised by llm_func) are never retried. A
-    structurally degraded or temporally violating output triggers exactly one
-    new Gemma pass with a reinforced structure instruction. If the retry also
-    fails, the exception propagates and the caller falls back to the raw mail.
-    """
+    """Rewrite once, with independent transport and validation retry budgets."""
     editorial_input = prepare_editorial_input(canonical_result)
     system_prompt = read_editorial_prompt(config.prompt_file)
-    retry_count = 0
+    transport_retry_count = 0
+    validation_retry_count = 0
+    attempt_number = 0
+
     while True:
-        prompt = reinforce_editorial_prompt(system_prompt) if retry_count else system_prompt
+        prompt = (
+            reinforce_editorial_prompt(system_prompt)
+            if validation_retry_count
+            else system_prompt
+        )
         messages = build_messages(prompt, editorial_input)
-        raw_text = llm_func(config, messages)
-        attempt_number = retry_count + 1
+        attempt_number += 1
+        try:
+            raw_text = llm_func(config, messages)
+        except EditorialTransientError as exc:
+            if transport_retry_count >= 1:
+                _set_retry_counts(exc, transport_retry_count, validation_retry_count)
+                raise
+            transport_retry_count += 1
+            sleep_func(TRANSIENT_RETRY_BACKOFF_SECONDS)
+            continue
+        except EditorialRewriteError as exc:
+            _set_retry_counts(exc, transport_retry_count, validation_retry_count)
+            raise
+
         citation_stats: dict[str, Any] | None = None
         editorial: dict[str, Any] | None = None
+        validation_error: EditorialRewriteError | None = None
         try:
             editorial = parse_editorial_output(raw_text)
             citation_stats = validate_editorial_output(
@@ -993,46 +1038,21 @@ def rewrite_editorial(
                     violations,
                 )
         except EditorialTemporalViolationError as exc:
-            _write_editorial_attempt_diagnostic(
-                diagnostics_dir,
-                attempt_number,
-                raw_text,
-                _editorial_attempt_diagnostic(
-                    attempt_number=attempt_number,
-                    raw_text=raw_text,
-                    reason=exc.reason,
-                    error=str(exc),
-                    editorial=editorial,
-                    temporal_violation_count=exc.violation_count,
-                ),
-            )
-            if retry_count >= 1:
-                exc.retry_count = retry_count
-                raise
-            retry_count += 1
-            continue
+            validation_error = exc
+            reason = exc.reason
+            temporal_violation_count = exc.violation_count
         except EditorialOutputValidationError as exc:
-            _write_editorial_attempt_diagnostic(
-                diagnostics_dir,
-                attempt_number,
-                raw_text,
-                _editorial_attempt_diagnostic(
-                    attempt_number=attempt_number,
-                    raw_text=raw_text,
-                    reason=exc.reason,
-                    error=str(exc),
-                    editorial=editorial,
-                ),
-            )
-            if retry_count >= 1:
-                exc.retry_count = retry_count
-                raise
-            retry_count += 1
-            continue
+            validation_error = exc
+            reason = exc.reason
+            temporal_violation_count = None
         except EditorialRewriteError as exc:
-            wrapped = EditorialOutputValidationError(
-                str(exc), reason="invalid_json", retry_count=retry_count
+            validation_error = EditorialOutputValidationError(
+                str(exc), reason="invalid_json"
             )
+            reason = validation_error.reason
+            temporal_violation_count = None
+
+        if validation_error is not None:
             _write_editorial_attempt_diagnostic(
                 diagnostics_dir,
                 attempt_number,
@@ -1040,15 +1060,23 @@ def rewrite_editorial(
                 _editorial_attempt_diagnostic(
                     attempt_number=attempt_number,
                     raw_text=raw_text,
-                    reason=wrapped.reason,
-                    error=str(wrapped),
+                    reason=reason,
+                    error=str(validation_error),
                     editorial=editorial,
+                    temporal_violation_count=temporal_violation_count,
                 ),
             )
-            if retry_count >= 1:
-                raise wrapped
-            retry_count += 1
+            if validation_retry_count >= 1:
+                _set_retry_counts(
+                    validation_error,
+                    transport_retry_count,
+                    validation_retry_count,
+                )
+                raise validation_error
+            validation_retry_count += 1
             continue
+
+        retry_count = transport_retry_count + validation_retry_count
         return (
             build_editorial_result(
                 canonical_result,
@@ -1057,24 +1085,21 @@ def rewrite_editorial(
                 config.model,
                 temporal_violation_count=0,
                 retry_count=retry_count,
+                transport_retry_count=transport_retry_count,
+                validation_retry_count=validation_retry_count,
                 output_validation_status="ok",
                 output_invalid_reason=None,
                 citation_numbers_normalized=bool(
                     citation_stats and citation_stats["normalized"]
                 ),
-                declared_citation_count=(
-                    citation_stats or {}
-                ).get("declared_count"),
-                actual_citation_count=(
-                    citation_stats or {}
-                ).get("actual_count"),
-                declared_unused_citation_count=(
-                    citation_stats or {}
-                ).get("declared_unused_count"),
+                declared_citation_count=(citation_stats or {}).get("declared_count"),
+                actual_citation_count=(citation_stats or {}).get("actual_count"),
+                declared_unused_citation_count=(citation_stats or {}).get(
+                    "declared_unused_count"
+                ),
             ),
             raw_text,
         )
-
 
 def env_value(name: str, file_values: dict[str, str]) -> str:
     if name in os.environ:

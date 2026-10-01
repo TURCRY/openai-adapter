@@ -1,13 +1,16 @@
 import json
+import io
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock
 
-from editorial_rewrite import EditorialRewriteError
+from editorial_rewrite import EditorialRewriteError, EditorialTransientError, rewrite_editorial
 from mail_builder import MailBuildError
 from mail_sender import MailSendError, SMTPConfig
+from monday_veille_light import cmd_marker_status
 from perplexica_client import PerplexicaClientError
 from run_perplexica_mail_job import (
     JobConfigError,
@@ -18,6 +21,7 @@ from run_perplexica_mail_job import (
     read_prompt,
     resolve_prompt_path,
     run_job,
+    resume_editorial_run,
     subject_for_variant,
     temporal_safe_result_copy,
 )
@@ -378,10 +382,219 @@ class RunPerplexicaMailJobTests(unittest.TestCase):
             send_mail_func=send,
             editorial_rewrite_func=Mock(side_effect=EditorialRewriteError("timeout")),
         )
+        self.assertEqual(metadata["status"], "partial")
         self.assertEqual(metadata["editorial_status"], "fallback_raw")
         self.assertTrue(metadata["raw_mail_sent"])
         self.assertFalse(metadata["editorial_mail_sent"])
         send.assert_called_once()
+
+    def test_transient_editorial_retry_success_builds_editorial_mail(self):
+        self.write_job(mail_mode="both")
+        send = Mock(return_value={"sent": True})
+        calls = []
+
+        def rewriter(result, config):
+            def llm(_config, _messages):
+                calls.append(1)
+                if len(calls) == 1:
+                    raise EditorialTransientError("Editorial timeout after 1000 seconds.")
+                return json.dumps(
+                    {
+                        "title": "Titre éditorial",
+                        "body_markdown": "Corps éditorial [1].",
+                        "citation_numbers": [1],
+                    },
+                    ensure_ascii=False,
+                )
+
+            return rewrite_editorial(result, config, llm_func=llm, sleep_func=lambda _: None)
+
+        _, metadata = run_job(
+            self.job_path,
+            output_root=self.output_root,
+            client_factory=FakeClient,
+            build_mail_func=mail_for_call,
+            smtp_config_factory=lambda: SMTPConfig(
+                host="smtp.example",
+                from_address="a@example.com",
+                to_address="b@example.com",
+            ),
+            send_mail_func=send,
+            editorial_rewrite_func=rewriter,
+        )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(metadata["status"], "completed")
+        self.assertEqual(metadata["editorial_retry_count"], 1)
+        self.assertTrue(metadata["editorial_mail_built"])
+        self.assertTrue(metadata["editorial_mail_sent"])
+        self.assertEqual(send.call_count, 2)
+    def test_exhausted_transient_editorial_retries_leave_partial_status(self):
+        self.write_job(mail_mode="both")
+        send = Mock(return_value={"sent": True})
+        calls = []
+
+        def rewriter(result, config):
+            def llm(_config, _messages):
+                calls.append(1)
+                raise EditorialTransientError("Editorial HTTP error: 503")
+
+            return rewrite_editorial(result, config, llm_func=llm, sleep_func=lambda _: None)
+
+        _, metadata = run_job(
+            self.job_path,
+            output_root=self.output_root,
+            client_factory=FakeClient,
+            build_mail_func=mail_for_call,
+            smtp_config_factory=lambda: SMTPConfig(
+                host="smtp.example",
+                from_address="a@example.com",
+                to_address="b@example.com",
+            ),
+            send_mail_func=send,
+            editorial_rewrite_func=rewriter,
+        )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(metadata["status"], "partial")
+        self.assertEqual(metadata["editorial_retry_count"], 1)
+        self.assertTrue(metadata["raw_mail_sent"])
+        self.assertFalse(metadata["editorial_mail_built"])
+        self.assertFalse(metadata["editorial_mail_sent"])
+        send.assert_called_once()
+    def test_two_invalid_editorial_outputs_leave_partial_status(self):
+        self.write_job(mail_mode="both")
+        send = Mock(return_value={"sent": True})
+        calls = []
+        invalid = json.dumps(
+            {
+                "title": "Titre éditorial",
+                "body_markdown": "Citation inventée [99].",
+                "citation_numbers": [99],
+                "analyse": "x" * 500,
+            },
+            ensure_ascii=False,
+        )
+
+        def rewriter(result, config):
+            def llm(_config, _messages):
+                calls.append(1)
+                return invalid
+
+            return rewrite_editorial(result, config, llm_func=llm)
+
+        _, metadata = run_job(
+            self.job_path,
+            output_root=self.output_root,
+            client_factory=FakeClient,
+            build_mail_func=mail_for_call,
+            smtp_config_factory=lambda: SMTPConfig(
+                host="smtp.example",
+                from_address="a@example.com",
+                to_address="b@example.com",
+            ),
+            send_mail_func=send,
+            editorial_rewrite_func=rewriter,
+        )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(metadata["status"], "partial")
+        self.assertEqual(metadata["editorial_retry_count"], 1)
+        self.assertTrue(metadata["raw_mail_sent"])
+        self.assertFalse(metadata["editorial_mail_built"])
+        self.assertFalse(metadata["editorial_mail_sent"])
+        send.assert_called_once()
+    def test_resume_partial_builds_and_sends_only_editorial(self):
+        self.write_job(mail_mode="both")
+        run_dir = self.output_root / "veille_test" / "20260928T010003Z_test"
+        run_dir.mkdir(parents=True)
+        result = result_for("resume")
+        (run_dir / "result.json").write_text(
+            json.dumps(result, ensure_ascii=False), encoding="utf-8"
+        )
+        (run_dir / "run.json").write_text(
+            json.dumps({
+                "job_name": "veille_test",
+                "started_at": "2026-09-28T01:00:03+00:00",
+                "finished_at": "2026-09-28T01:33:41+00:00",
+                "status": "partial",
+                "chat_id": result["chat_id"],
+                "message_id": result["message_id"],
+                "source_count": 1,
+                "cited_source_count": 1,
+                "mail_requested": True,
+                "mail_sent": True,
+                "mail_mode": "both",
+                "raw_mail_built": True,
+                "raw_mail_sent": True,
+                "editorial_requested": True,
+                "editorial_status": "fallback_raw",
+                "editorial_mail_built": False,
+                "editorial_mail_sent": False,
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        marker_dir = self.output_root / "markers"
+        marker_dir.mkdir(parents=True)
+        partial_marker = marker_dir / "2026-09-28.partial"
+        partial_marker.write_text(
+            json.dumps(
+                {
+                    "status": "partial",
+                    "run_status": "partial",
+                    "run_id": run_dir.name,
+                    "raw_mail_sent": True,
+                    "editorial_mail_sent": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "raw_mail.txt").write_text("sentinel raw", encoding="utf-8")
+        builder = Mock(side_effect=mail_for_call)
+        send = Mock(return_value={"sent": True, "message_id": "<editorial@test>"})
+
+        _, metadata = resume_editorial_run(
+            self.job_path,
+            run_dir,
+            build_mail_func=builder,
+            smtp_config_factory=lambda: SMTPConfig(
+                host="smtp.example",
+                from_address="a@example.com",
+                to_address="b@example.com",
+            ),
+            send_mail_func=send,
+            editorial_rewrite_func=lambda result, config: (editorial_payload(), "raw llm"),
+            marker_dir=marker_dir,
+        )
+
+        self.assertEqual(metadata["status"], "completed")
+        self.assertTrue(metadata["editorial_mail_built"])
+        self.assertTrue(metadata["editorial_mail_sent"])
+        self.assertEqual(metadata["editorial_message_id"], "<editorial@test>")
+        self.assertEqual((run_dir / "raw_mail.txt").read_text(encoding="utf-8"), "sentinel raw")
+        self.assertTrue((run_dir / "editorial_mail.html").exists())
+        self.assertEqual(builder.call_count, 1)
+        self.assertIsNotNone(builder.call_args.kwargs["editorial"])
+        self.assertEqual(
+            builder.call_args.kwargs["subject"],
+            "Sujet test — Synthèse semaine 40",
+        )
+        send.assert_called_once()
+        self.assertEqual(FakeClient.calls, [])
+        ok_marker = marker_dir / "2026-09-28.ok"
+        self.assertTrue(ok_marker.exists())
+        self.assertFalse(partial_marker.exists())
+        ok_payload = json.loads(ok_marker.read_text(encoding="utf-8"))
+        self.assertEqual(ok_payload["marker_status"], "ok")
+        self.assertEqual(ok_payload["status"], "completed")
+        self.assertTrue(ok_payload["raw_mail_sent"])
+        self.assertTrue(ok_payload["editorial_mail_sent"])
+        archived = list((marker_dir / "history").glob("2026-09-28.partial.*.json"))
+        self.assertEqual(len(archived), 1)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(cmd_marker_status(marker_dir, "2026-09-28"), 0)
+        self.assertEqual(output.getvalue().strip(), "ok")
 
     def test_dry_run_does_not_send_smtp(self):
         send = Mock(return_value={"sent": True})
@@ -849,10 +1062,10 @@ class RunPerplexicaMailJobTests(unittest.TestCase):
         self.assertTrue((run_dir / "raw_mail.txt").exists())
         self.assertFalse((run_dir / "editorial_mail.txt").exists())
 
-    def test_real_job_editorial_timeout_is_900(self):
+    def test_real_job_editorial_timeout_is_1000(self):
         job_path = Path(__file__).resolve().parent / "jobs" / "veille_expertise_mediation.json"
         job = load_job(job_path)
-        self.assertEqual(job["editorial"]["timeout"], 900)
+        self.assertEqual(job["editorial"]["timeout"], 1000)
         temporal = job.get("temporal") or {}
         self.assertTrue(temporal.get("enabled"))
         self.assertTrue(((temporal.get("requalification") or {}).get("enabled")))
