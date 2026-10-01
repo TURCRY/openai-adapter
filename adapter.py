@@ -284,6 +284,10 @@ HTTP_LIMITS = Limits(max_connections=100, max_keepalive_connections=20)
 _http = httpx.AsyncClient(limits=HTTP_LIMITS, timeout=TIMEOUT_PING)
 
 
+def _preferred_local_backend() -> str:
+    return LOCAL_BACKEND_CANDIDATES[0] if LOCAL_BACKEND_CANDIDATES else ""
+
+
 async def _probe_backend_ping(base_url: str, ping_path: str, headers: dict[str, str] | None = None) -> tuple[bool, str]:
     url = f"{normalize_backend_url(base_url)}{ping_path}"
     try:
@@ -293,6 +297,33 @@ async def _probe_backend_ping(base_url: str, ping_path: str, headers: dict[str, 
         return False, f"HTTP {r.status_code}"
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"
+
+
+async def _restore_preferred_local_backend_if_healthy() -> None:
+    """Move back to the configured primary backend as soon as it recovers.
+
+    Runtime fallback mutates LOCAL_BASE. Without this probe, a successful
+    fallback backend can remain sticky long after the VPN path has recovered.
+    """
+    global LOCAL_BASE, _last_ping_ok_ts
+    preferred = _preferred_local_backend()
+    if not preferred or LOCAL_BASE == preferred:
+        return
+    async with _backend_reselect_lock:
+        if LOCAL_BASE == preferred:
+            return
+        ok, detail = await _probe_backend_ping(
+            preferred,
+            LOCAL_PING_PATH,
+            headers=_llm_headers(),
+        )
+        if not ok:
+            log.debug("Backend Flask primary still unavailable: %s (%s)", preferred, detail)
+            return
+        old_base = LOCAL_BASE
+        LOCAL_BASE = preferred
+        _last_ping_ok_ts = time.monotonic()
+        log.warning("Backend Flask primary restored: old=%s new=%s (%s)", old_base or "(aucun)", LOCAL_BASE, detail)
 
 
 async def configure_local_backend_from_candidates() -> None:
@@ -363,6 +394,7 @@ async def _reselect_local_backend(reason: str) -> bool:
 
 
 async def _local_request_once_with_runtime_fallback(method: str, path: str, *, timeout: httpx.Timeout | float, **kwargs) -> httpx.Response:
+    await _restore_preferred_local_backend_if_healthy()
     base = LOCAL_BASE
     url = f"{base}{path}"
     try:

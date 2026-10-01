@@ -96,6 +96,7 @@ class RuntimeBackendFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.old_candidates = list(adapter.LOCAL_BACKEND_CANDIDATES)
         self.old_http = adapter._http
         self.old_select = adapter.select_backend_url
+        self.old_probe = adapter._probe_backend_ping
         self.old_ping_ts = adapter._last_ping_ok_ts
         adapter.LOCAL_BASE = "http://old:5050"
         adapter.LOCAL_BACKEND_CANDIDATES = ["http://old:5050", "http://new:5050"]
@@ -107,6 +108,7 @@ class RuntimeBackendFallbackTests(unittest.IsolatedAsyncioTestCase):
         adapter.LOCAL_BACKEND_CANDIDATES = self.old_candidates
         adapter._http = self.old_http
         adapter.select_backend_url = self.old_select
+        adapter._probe_backend_ping = self.old_probe
         adapter._last_ping_ok_ts = self.old_ping_ts
         adapter._backend_reselect_lock = asyncio.Lock()
 
