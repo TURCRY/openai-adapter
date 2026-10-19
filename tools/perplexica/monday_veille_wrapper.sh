@@ -32,16 +32,30 @@ MAIL_ENV="$SCRIPT_DIR/.env"
 SEARXNG_URL="${VEILLE_SEARXNG_URL:-http://127.0.0.1:18081/search?q=expertise%20judiciaire&format=json}"
 SEARXNG_TIMEOUT="${VEILLE_SEARXNG_TIMEOUT:-25}"
 LAST_SLOT="${VEILLE_LAST_SLOT:-07:45}"
+RECOVERY_ONLY_SLOTS="${VEILLE_RECOVERY_ONLY_SLOTS:-09:00 12:00 15:00 18:00}"
+RECOVERY_ONLY="${VEILLE_RECOVERY_ONLY:-0}"
 FAILURE_SUBJECT="${VEILLE_FAILURE_SUBJECT:-Veille hebdomadaire — échec (SearXNG indisponible)}"
 FAILURE_BODY="${VEILLE_FAILURE_BODY:-Veille non exécutée : SearXNG indisponible / aucun moteur productif.}"
 
-DATE=$(date +%F)
-SLOT=$(date +%H:%M)
+DATE=${VEILLE_DATE:-$(date +%F)}
+SLOT=${VEILLE_SLOT:-$(date +%H:%M)}
 
 mkdir -p "$MARKER_DIR" "$LOG_DIR" "$WRAPPER_OUTPUT/mails"
 
 log() {
     printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" | tee -a "$LOG_DIR/$DATE.log"
+}
+
+is_recovery_only_slot() {
+    if [ "$RECOVERY_ONLY" = "1" ]; then
+        return 0
+    fi
+    for candidate in $RECOVERY_ONLY_SLOTS; do
+        if [ "$SLOT" = "$candidate" ]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # flock: never run two wrapper instances concurrently
@@ -61,20 +75,71 @@ case "$MARKER" in
         exit 0
         ;;
     partial)
-        log "marker: $DATE.partial present (blocked for today); exit."
-        exit 0
+        log "marker: $DATE.partial present; checking editorial resume."
+        CANDIDATE=$("$PYTHON_BIN" "$HELPER" resume-candidate "$MARKER_DIR" "$JOB_OUTPUT_ROOT" "$DATE" 2>&1)
+        CANDIDATE_RC=$?
+        log "resume-candidate rc=$CANDIDATE_RC: $CANDIDATE"
+        ACTION=$(printf '%s\n' "$CANDIDATE" | sed -n 's/^action=//p' | head -n 1)
+        RUN_ID=$(printf '%s\n' "$CANDIDATE" | sed -n 's/^run_id=//p' | head -n 1)
+        RUN_DIR=$(printf '%s\n' "$CANDIDATE" | sed -n 's/^run_dir=//p' | head -n 1)
+        if [ "$CANDIDATE_RC" -ne 0 ]; then
+            log "resume-candidate failed; keeping .partial for next slot."
+            exit 0
+        fi
+        case "$ACTION" in
+            resume)
+                if [ -z "$RUN_DIR" ]; then
+                    log "resume-candidate returned resume without run_dir; keeping .partial."
+                    exit 0
+                fi
+                RESUME_LOG="$LOG_DIR/resume_${DATE}_${SLOT}.log"
+                (
+                    cd "$SCRIPT_DIR" || exit 1
+                    sh "$JOB_WRAPPER" --resume-editorial-run "$RUN_DIR"
+                ) >"$RESUME_LOG" 2>&1
+                RESUME_RC=$?
+                log "editorial resume rc=$RESUME_RC run_id=$RUN_ID log=$RESUME_LOG"
+                if [ -f "$MARKER_DIR/$DATE.ok" ]; then
+                    log "editorial resume completed: $MARKER_DIR/$DATE.ok present."
+                else
+                    log "editorial resume incomplete; .partial kept for next slot."
+                fi
+                exit 0
+                ;;
+            already_sent)
+                log "editorial already sent for run ${RUN_ID:-unknown}; no resend."
+                exit 0
+                ;;
+            smtp_outcome_unknown)
+                log "editorial SMTP outcome unknown for run ${RUN_ID:-unknown}; manual verification required; no resend."
+                exit 0
+                ;;
+            *)
+                log "partial not resumable (${ACTION:-unknown}); no action."
+                exit 0
+                ;;
+        esac
         ;;
     failed)
         log "marker: $DATE.failed present (failure notice already sent); exit."
         exit 0
         ;;
     none)
+        if is_recovery_only_slot; then
+            log "marker: none; recovery-only slot $SLOT; no heavy run."
+            exit 0
+        fi
         log "marker: none"
         ;;
     *)
         log "marker-status returned unexpected value '$MARKER'; treated as none."
         ;;
 esac
+
+if is_recovery_only_slot; then
+    log "recovery-only slot $SLOT; no heavy run for marker '$MARKER'."
+    exit 0
+fi
 
 # 2) light SearXNG check
 SEARXNG_OUT=$("$PYTHON_BIN" "$HELPER" searxng-check "$SEARXNG_URL" --timeout "$SEARXNG_TIMEOUT" 2>&1)

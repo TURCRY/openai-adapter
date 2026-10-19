@@ -10,6 +10,7 @@ import re
 import sys
 import uuid
 from datetime import date, datetime, timezone
+from email.utils import make_msgid
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -29,6 +30,9 @@ TOOLS_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_ROOT = TOOLS_DIR / "output" / "jobs"
 DEFAULT_MARKER_DIR = TOOLS_DIR / "output" / "veille_wrapper" / "markers"
 SUCCESS_STATUSES = {"completed", "completed_no_mail"}
+EDITORIAL_SEND_STATE_PREPARED = "prepared"
+EDITORIAL_SEND_STATE_SENDING = "sending"
+EDITORIAL_SEND_STATE_SENT = "sent"
 SAFE_JOB_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 MAIL_MODES = {"raw", "editorial", "both"}
 CITATION_BLOCK_RE = re.compile(r"\[([1-9]\d*(?:\s*,\s*[1-9]\d*)*)\]")
@@ -556,6 +560,9 @@ def build_run_metadata(
     editorial_declared_unused_citation_count: int | None = None,
     editorial_mail_built: bool = False,
     editorial_mail_sent: bool = False,
+    editorial_send_state: str | None = None,
+    editorial_send_attempted_at: str | None = None,
+    editorial_message_id: str | None = None,
 ) -> dict[str, Any]:
     result = result or {}
     mail_sent = raw_mail_sent or editorial_mail_sent
@@ -579,6 +586,9 @@ def build_run_metadata(
         "editorial_fallback_reason": editorial_fallback_reason,
         "editorial_mail_built": editorial_mail_built,
         "editorial_mail_sent": editorial_mail_sent,
+        "editorial_send_state": editorial_send_state,
+        "editorial_send_attempted_at": editorial_send_attempted_at,
+        "editorial_message_id": editorial_message_id,
         "error": error,
     }
     if editorial_temporal_violation_count is not None:
@@ -774,6 +784,9 @@ def run_job(
     editorial_declared_unused_citation_count = None
     editorial_mail_built = False
     editorial_mail_sent = False
+    editorial_send_state: str | None = None
+    editorial_send_attempted_at: str | None = None
+    editorial_message_id: str | None = None
     result: dict[str, Any] | None = None
     raw_mail: dict[str, Any] | None = None
     editorial_mail: dict[str, Any] | None = None
@@ -805,6 +818,9 @@ def run_job(
             editorial_declared_unused_citation_count=editorial_declared_unused_citation_count,
             editorial_mail_built=editorial_mail_built,
             editorial_mail_sent=editorial_mail_sent,
+            editorial_send_state=editorial_send_state,
+            editorial_send_attempted_at=editorial_send_attempted_at,
+            editorial_message_id=editorial_message_id,
         )
         write_json(run_dir / "run.json", metadata)
         return metadata
@@ -963,13 +979,35 @@ def run_job(
             raw_mail_sent = bool(send_mail_func(raw_mail, smtp_config, dry_run=False).get("sent"))
         elif mail_mode == "editorial":
             if editorial_mail is not None:
-                editorial_mail_sent = bool(send_mail_func(editorial_mail, smtp_config, dry_run=False).get("sent"))
+                prepared_message_id = make_msgid()
+                editorial_message_id = prepared_message_id
+                editorial_send_state = EDITORIAL_SEND_STATE_SENDING
+                editorial_send_attempted_at = iso_now()
+                finish("partial", None)
+                editorial_send_payload = dict(editorial_mail)
+                editorial_send_payload["smtp_message_id"] = prepared_message_id
+                send_result = send_mail_func(editorial_send_payload, smtp_config, dry_run=False)
+                editorial_mail_sent = bool(send_result.get("sent"))
+                editorial_message_id = send_result.get("message_id") or prepared_message_id
+                if editorial_mail_sent:
+                    editorial_send_state = EDITORIAL_SEND_STATE_SENT
             elif raw_mail is not None:
                 raw_mail_sent = bool(send_mail_func(raw_mail, smtp_config, dry_run=False).get("sent"))
         elif mail_mode == "both":
             raw_mail_sent = bool(send_mail_func(raw_mail, smtp_config, dry_run=False).get("sent"))
             if editorial_mail is not None:
-                editorial_mail_sent = bool(send_mail_func(editorial_mail, smtp_config, dry_run=False).get("sent"))
+                prepared_message_id = make_msgid()
+                editorial_message_id = prepared_message_id
+                editorial_send_state = EDITORIAL_SEND_STATE_SENDING
+                editorial_send_attempted_at = iso_now()
+                finish("partial", None)
+                editorial_send_payload = dict(editorial_mail)
+                editorial_send_payload["smtp_message_id"] = prepared_message_id
+                send_result = send_mail_func(editorial_send_payload, smtp_config, dry_run=False)
+                editorial_mail_sent = bool(send_result.get("sent"))
+                editorial_message_id = send_result.get("message_id") or prepared_message_id
+                if editorial_mail_sent:
+                    editorial_send_state = EDITORIAL_SEND_STATE_SENT
     except MailSendError as exc:
         status = "partial" if mail_mode == "both" and raw_mail_sent and not editorial_mail_sent else "mail_failed"
         return run_dir, finish(status, str(exc))
@@ -1070,8 +1108,16 @@ def resume_editorial_run(
         raise JobRunError("Editorial resume requires a 'both' run with editorial_requested=true.")
     if not metadata.get("raw_mail_sent"):
         raise JobRunError("Editorial resume requires raw_mail_sent=true.")
-    if metadata.get("editorial_mail_sent"):
+    send_state = metadata.get("editorial_send_state")
+    if metadata.get("editorial_mail_sent") or send_state == EDITORIAL_SEND_STATE_SENT:
         raise JobRunError("Editorial mail is already marked as sent; refusing a duplicate.")
+    if send_state == EDITORIAL_SEND_STATE_SENDING:
+        raise JobRunError(
+            "Editorial SMTP outcome is unknown (editorial_send_state=sending); "
+            "manual verification required; refusing automatic resend."
+        )
+    if send_state not in (None, "", EDITORIAL_SEND_STATE_PREPARED):
+        raise JobRunError(f"Unsupported editorial_send_state: {send_state!r}")
 
     def persist(status: str, error: str | None) -> tuple[Path, dict[str, Any]]:
         metadata["finished_at"] = iso_now()
@@ -1118,17 +1164,26 @@ def resume_editorial_run(
     )
     write_mail_outputs(run_dir, "editorial", editorial_mail)
     metadata["editorial_mail_built"] = True
+    metadata["editorial_send_state"] = EDITORIAL_SEND_STATE_PREPARED
     if dry_run:
         return persist("partial", None)
 
+    prepared_message_id = make_msgid()
+    metadata["editorial_message_id"] = prepared_message_id
+    metadata["editorial_send_state"] = EDITORIAL_SEND_STATE_SENDING
+    metadata["editorial_send_attempted_at"] = iso_now()
+    persist("partial", None)
+    editorial_send_payload = dict(editorial_mail)
+    editorial_send_payload["smtp_message_id"] = prepared_message_id
     try:
-        send_result = send_mail_func(editorial_mail, smtp_config_factory(), dry_run=False)
+        send_result = send_mail_func(editorial_send_payload, smtp_config_factory(), dry_run=False)
     except (MailSendError, OSError) as exc:
         return persist("partial", str(exc))
     metadata["editorial_mail_sent"] = bool(send_result.get("sent"))
-    metadata["editorial_message_id"] = send_result.get("message_id")
+    metadata["editorial_message_id"] = send_result.get("message_id") or prepared_message_id
     if not metadata["editorial_mail_sent"]:
         return persist("partial", "SMTP did not confirm editorial send.")
+    metadata["editorial_send_state"] = EDITORIAL_SEND_STATE_SENT
     completed = persist("completed", None)
     promote_recovered_marker(run_dir, metadata, marker_dir=marker_dir)
     return completed

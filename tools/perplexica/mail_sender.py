@@ -181,11 +181,13 @@ def validate_smtp_config(config: SMTPConfig) -> None:
 def normalize_mail_payload(payload: dict[str, Any], input_path: Path | None = None) -> dict[str, Any]:
     if all(isinstance(payload.get(key), str) for key in ("subject", "text", "html")):
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        smtp_message_id = payload.get("smtp_message_id")
         return {
             "subject": payload["subject"],
             "text": payload["text"],
             "html": payload["html"],
             "metadata": metadata,
+            "smtp_message_id": smtp_message_id if isinstance(smtp_message_id, str) and smtp_message_id else None,
         }
 
     if input_path is not None and isinstance(payload.get("subject"), str):
@@ -198,11 +200,13 @@ def normalize_mail_payload(payload: dict[str, Any], input_path: Path | None = No
             raise MailSendError(
                 "Metadata JSON was provided, but sibling .txt/.html files could not be read."
             ) from exc
+        smtp_message_id = payload.get("smtp_message_id")
         return {
             "subject": payload["subject"],
             "text": text,
             "html": html_body,
             "metadata": payload,
+            "smtp_message_id": smtp_message_id if isinstance(smtp_message_id, str) and smtp_message_id else None,
         }
 
     raise MailSendError(
@@ -236,7 +240,7 @@ def build_email_message(mail: dict[str, Any], smtp_config: SMTPConfig) -> EmailM
     validate_smtp_config(smtp_config)
     normalized = normalize_mail_payload(mail)
     message = EmailMessage()
-    message_id = make_msgid()
+    message_id = normalized.get("smtp_message_id") or make_msgid()
     message["Subject"] = normalized["subject"]
     message["From"] = build_from_header(smtp_config)
     message["To"] = ", ".join(smtp_config.recipients)

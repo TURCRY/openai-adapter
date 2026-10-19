@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import html as _html
 import json
+import re
 import sys
 import urllib.request
 from datetime import datetime
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 MARKER_KINDS = ("ok", "partial", "failed")
+SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def _print(name: str, value: Any) -> None:
@@ -122,6 +124,129 @@ def cmd_failure_mail(out_json: Path, subject: str, body: str) -> int:
     return 0
 
 
+def cmd_resume_candidate(marker_dir: Path, run_root: Path, date_str: str) -> int:
+    marker_path = marker_dir / f"{date_str}.partial"
+    if not marker_path.is_file():
+        _print("action", "none")
+        return 0
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _print("action", "unsafe")
+        _print("reason", "marker_unreadable")
+        return 0
+    if not isinstance(marker, dict):
+        _print("action", "unsafe")
+        _print("reason", "marker_not_object")
+        return 0
+    if marker.get("date") != date_str:
+        _print("action", "unsafe")
+        _print("reason", "marker_date_mismatch")
+        return 0
+    run_id = str(marker.get("run_id") or "")
+    if not SAFE_RUN_ID_RE.fullmatch(run_id):
+        _print("action", "unsafe")
+        _print("reason", "invalid_run_id")
+        return 0
+    run_root = Path(run_root).resolve()
+    run_dir = (run_root / run_id).resolve()
+    if run_dir.parent != run_root or run_dir.name != run_id:
+        _print("action", "unsafe")
+        _print("reason", "run_dir_outside_root")
+        _print("run_id", run_id)
+        return 0
+    run_file = run_dir / "run.json"
+    if not run_file.is_file():
+        _print("action", "unsafe")
+        _print("reason", "run_json_missing")
+        _print("run_id", run_id)
+        return 0
+    try:
+        metadata = json.loads(run_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _print("action", "unsafe")
+        _print("reason", "run_json_unreadable")
+        _print("run_id", run_id)
+        return 0
+    if not isinstance(metadata, dict):
+        _print("action", "unsafe")
+        _print("reason", "run_json_not_object")
+        _print("run_id", run_id)
+        return 0
+    started_at = str(metadata.get("started_at") or "")
+    try:
+        business_date = datetime.fromisoformat(started_at.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        _print("action", "unsafe")
+        _print("reason", "started_at_invalid")
+        _print("run_id", run_id)
+        return 0
+    if business_date != date_str:
+        _print("action", "unsafe")
+        _print("reason", "run_date_mismatch")
+        _print("run_id", run_id)
+        return 0
+    if not (run_dir / "result.json").is_file():
+        _print("action", "unsafe")
+        _print("reason", "result_json_missing")
+        _print("run_id", run_id)
+        return 0
+    if metadata.get("mail_mode") != "both":
+        _print("action", "unsafe")
+        _print("reason", "mail_mode_not_both")
+        _print("run_id", run_id)
+        return 0
+    if not metadata.get("editorial_requested"):
+        _print("action", "unsafe")
+        _print("reason", "editorial_not_requested")
+        _print("run_id", run_id)
+        return 0
+    if not metadata.get("raw_mail_sent"):
+        _print("action", "unsafe")
+        _print("reason", "raw_not_sent")
+        _print("run_id", run_id)
+        return 0
+    if marker.get("raw_mail_sent") is False:
+        _print("action", "unsafe")
+        _print("reason", "marker_raw_not_sent")
+        _print("run_id", run_id)
+        return 0
+    if marker.get("editorial_mail_sent") is True:
+        _print("action", "already_sent")
+        _print("reason", "marker_editorial_mail_sent_true")
+        _print("run_id", run_id)
+        _print("run_dir", str(run_dir))
+        return 0
+    send_state = metadata.get("editorial_send_state")
+    if metadata.get("editorial_mail_sent") or send_state == "sent":
+        if metadata.get("editorial_mail_sent"):
+            _print("action", "already_sent")
+            _print("reason", "editorial_mail_sent_true")
+        else:
+            _print("action", "smtp_outcome_unknown")
+            _print("reason", "send_state_sent_without_sent_flag")
+        _print("run_id", run_id)
+        _print("run_dir", str(run_dir))
+        return 0
+    if send_state == "sending":
+        _print("action", "smtp_outcome_unknown")
+        _print("reason", "send_state_sending")
+        _print("run_id", run_id)
+        _print("run_dir", str(run_dir))
+        return 0
+    if send_state not in (None, "", "prepared"):
+        _print("action", "unsafe")
+        _print("reason", "unknown_send_state")
+        _print("run_id", run_id)
+        _print("run_dir", str(run_dir))
+        return 0
+    _print("action", "resume")
+    _print("reason", "eligible")
+    _print("run_id", run_id)
+    _print("run_dir", str(run_dir))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Light helpers for the Monday veille wrapper.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -135,6 +260,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("marker_dir")
     p.add_argument("date")
     p.set_defaults(func=lambda a: cmd_marker_status(Path(a.marker_dir), a.date))
+
+    p = sub.add_parser("resume-candidate")
+    p.add_argument("marker_dir")
+    p.add_argument("run_root")
+    p.add_argument("date")
+    p.set_defaults(func=lambda a: cmd_resume_candidate(
+        Path(a.marker_dir), Path(a.run_root), a.date
+    ))
 
     p = sub.add_parser("write-marker")
     p.add_argument("marker_dir")
