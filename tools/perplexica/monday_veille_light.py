@@ -15,7 +15,7 @@ import json
 import re
 import sys
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -247,6 +247,45 @@ def cmd_resume_candidate(marker_dir: Path, run_root: Path, date_str: str) -> int
     return 0
 
 
+def compute_business_context(today_str: str, weekday: int, hour: int) -> dict[str, Any]:
+    try:
+        today = date.fromisoformat(today_str)
+    except ValueError as exc:
+        raise ValueError(f"invalid today: {today_str!r}") from exc
+    if weekday < 1 or weekday > 7:
+        raise ValueError(f"invalid weekday: {weekday}")
+    if hour < 0 or hour > 23:
+        raise ValueError(f"invalid hour: {hour}")
+    if today.isoweekday() != weekday:
+        raise ValueError(
+            f"weekday {weekday} does not match today {today_str} ({today.isoweekday()})"
+        )
+    if weekday == 2:
+        business_date = today - timedelta(days=1)
+        mode = "recovery" if 3 <= hour <= 6 else "recovery_closed"
+    else:
+        mode = "normal"
+        business_date = today
+    return {
+        "mode": mode,
+        "business_date": business_date.isoformat(),
+        "today": today.isoformat(),
+        "weekday": weekday,
+        "hour": hour,
+    }
+
+
+def cmd_business_context(today_str: str, weekday_str: str, hour_str: str) -> int:
+    try:
+        context = compute_business_context(today_str, int(weekday_str), int(hour_str))
+    except (TypeError, ValueError) as exc:
+        print(f"business_context_error={exc}", file=sys.stderr)
+        return 1
+    for key in ("mode", "business_date", "today", "weekday", "hour"):
+        _print(key, context[key])
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Light helpers for the Monday veille wrapper.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -260,6 +299,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("marker_dir")
     p.add_argument("date")
     p.set_defaults(func=lambda a: cmd_marker_status(Path(a.marker_dir), a.date))
+
+    p = sub.add_parser("business-context")
+    p.add_argument("--today", required=True)
+    p.add_argument("--weekday", required=True)
+    p.add_argument("--hour", required=True)
+    p.set_defaults(func=lambda a: cmd_business_context(a.today, a.weekday, a.hour))
 
     p = sub.add_parser("resume-candidate")
     p.add_argument("marker_dir")

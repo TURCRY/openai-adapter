@@ -32,30 +32,20 @@ MAIL_ENV="$SCRIPT_DIR/.env"
 SEARXNG_URL="${VEILLE_SEARXNG_URL:-http://127.0.0.1:18081/search?q=expertise%20judiciaire&format=json}"
 SEARXNG_TIMEOUT="${VEILLE_SEARXNG_TIMEOUT:-25}"
 LAST_SLOT="${VEILLE_LAST_SLOT:-07:45}"
-RECOVERY_ONLY_SLOTS="${VEILLE_RECOVERY_ONLY_SLOTS:-09:00 12:00 15:00 18:00}"
 RECOVERY_ONLY="${VEILLE_RECOVERY_ONLY:-0}"
 FAILURE_SUBJECT="${VEILLE_FAILURE_SUBJECT:-Veille hebdomadaire — échec (SearXNG indisponible)}"
 FAILURE_BODY="${VEILLE_FAILURE_BODY:-Veille non exécutée : SearXNG indisponible / aucun moteur productif.}"
 
-DATE=${VEILLE_DATE:-$(date +%F)}
+TODAY=${VEILLE_TODAY:-$(date +%F)}
+WEEKDAY=${VEILLE_WEEKDAY:-$(date +%u)}
+HOUR=${VEILLE_HOUR:-$(date +%H)}
 SLOT=${VEILLE_SLOT:-$(date +%H:%M)}
+LOG_FILE="$LOG_DIR/$TODAY.log"
 
 mkdir -p "$MARKER_DIR" "$LOG_DIR" "$WRAPPER_OUTPUT/mails"
 
 log() {
-    printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" | tee -a "$LOG_DIR/$DATE.log"
-}
-
-is_recovery_only_slot() {
-    if [ "$RECOVERY_ONLY" = "1" ]; then
-        return 0
-    fi
-    for candidate in $RECOVERY_ONLY_SLOTS; do
-        if [ "$SLOT" = "$candidate" ]; then
-            return 0
-        fi
-    done
-    return 1
+    printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" | tee -a "$LOG_FILE"
 }
 
 # flock: never run two wrapper instances concurrently
@@ -65,7 +55,35 @@ if ! flock -n 9; then
     exit 0
 fi
 
-log "start date=$DATE slot=$SLOT"
+CONTEXT=$("$PYTHON_BIN" "$HELPER" business-context \
+    --today "$TODAY" --weekday "$WEEKDAY" --hour "$HOUR" 2>&1)
+CONTEXT_RC=$?
+if [ "$CONTEXT_RC" -ne 0 ]; then
+    log "business-context failed rc=$CONTEXT_RC: $CONTEXT; fail-closed, no run."
+    exit 0
+fi
+MODE=$(printf '%s\n' "$CONTEXT" | sed -n 's/^mode=//p' | head -n 1)
+DATE=$(printf '%s\n' "$CONTEXT" | sed -n 's/^business_date=//p' | head -n 1)
+case "$MODE" in
+    normal|recovery|recovery_closed) ;;
+    *)
+        log "business-context returned invalid mode '$MODE'; fail-closed, no run."
+        exit 0
+        ;;
+esac
+if [ -z "$DATE" ]; then
+    log "business-context returned no business_date; fail-closed, no run."
+    exit 0
+fi
+if [ "$MODE" = "recovery_closed" ]; then
+    log "start today=$TODAY weekday=$WEEKDAY hour=$HOUR slot=$SLOT mode=recovery_closed business_date=$DATE; outside recovery window, no run."
+    exit 0
+fi
+if [ "$RECOVERY_ONLY" = "1" ] && [ "$MODE" = "normal" ]; then
+    MODE=recovery
+fi
+
+log "start today=$TODAY weekday=$WEEKDAY hour=$HOUR slot=$SLOT mode=$MODE business_date=$DATE"
 
 # 1) daily marker guard
 MARKER=$("$PYTHON_BIN" "$HELPER" marker-status "$MARKER_DIR" "$DATE" 2>/dev/null || echo none)
@@ -92,7 +110,7 @@ case "$MARKER" in
                     log "resume-candidate returned resume without run_dir; keeping .partial."
                     exit 0
                 fi
-                RESUME_LOG="$LOG_DIR/resume_${DATE}_${SLOT}.log"
+                RESUME_LOG="$LOG_DIR/resume_${TODAY}_${SLOT}.log"
                 (
                     cd "$SCRIPT_DIR" || exit 1
                     sh "$JOB_WRAPPER" --resume-editorial-run "$RUN_DIR"
@@ -125,8 +143,8 @@ case "$MARKER" in
         exit 0
         ;;
     none)
-        if is_recovery_only_slot; then
-            log "marker: none; recovery-only slot $SLOT; no heavy run."
+        if [ "$MODE" = "recovery" ]; then
+            log "marker: none for business_date=$DATE; recovery-only mode, no heavy run."
             exit 0
         fi
         log "marker: none"
@@ -136,8 +154,8 @@ case "$MARKER" in
         ;;
 esac
 
-if is_recovery_only_slot; then
-    log "recovery-only slot $SLOT; no heavy run for marker '$MARKER'."
+if [ "$MODE" = "recovery" ]; then
+    log "recovery mode: no heavy run for marker '$MARKER' (business_date=$DATE)."
     exit 0
 fi
 
@@ -151,14 +169,14 @@ if [ "$SEARXNG_RC" -ne 0 ]; then
     if [ "$SLOT" = "$LAST_SLOT" ]; then
         log "last slot ($LAST_SLOT): sending light failure mail."
         MAIL_JSON="$WRAPPER_OUTPUT/mails/failure_${DATE}.json"
-        if "$PYTHON_BIN" "$HELPER" failure-mail "$MAIL_JSON" --subject "$FAILURE_SUBJECT" --body "$FAILURE_BODY" >>"$LOG_DIR/$DATE.log" 2>&1; then
-            "$PYTHON_BIN" "$SCRIPT_DIR/mail_sender.py" "$MAIL_JSON" --env-file "$MAIL_ENV" >>"$LOG_DIR/$DATE.log" 2>&1
+        if "$PYTHON_BIN" "$HELPER" failure-mail "$MAIL_JSON" --subject "$FAILURE_SUBJECT" --body "$FAILURE_BODY" >>"$LOG_FILE" 2>&1; then
+            "$PYTHON_BIN" "$SCRIPT_DIR/mail_sender.py" "$MAIL_JSON" --env-file "$MAIL_ENV" >>"$LOG_FILE" 2>&1
             MAIL_RC=$?
             log "failure mail send rc=$MAIL_RC"
             if [ "$MAIL_RC" -eq 0 ]; then
                 "$PYTHON_BIN" "$HELPER" write-marker "$MARKER_DIR" "$DATE" failed \
                     --slot "$SLOT" --run-id "" --run-status no_results \
-                    --source-count 0 --cited-source-count 0 >>"$LOG_DIR/$DATE.log" 2>&1
+                    --source-count 0 --cited-source-count 0 >>"$LOG_FILE" 2>&1
                 log "failure marker written: $MARKER_DIR/$DATE.failed"
             else
                 log "failure mail NOT confirmed; failure marker not written."
@@ -174,7 +192,7 @@ fi
 
 # 3) launch the real job exactly once
 log "searxng ok; launching heavy job once."
-JOB_LOG="$LOG_DIR/job_${DATE}_${SLOT}.log"
+JOB_LOG="$LOG_DIR/job_${TODAY}_${SLOT}.log"
 (
     cd "$SCRIPT_DIR" || exit 1
     sh "$JOB_WRAPPER"
@@ -216,7 +234,7 @@ if [ "$STATUS" = "completed" ] && [ "$MAIL_SENT" = "True" ] && [ "$RAW_SENT" = "
     "$PYTHON_BIN" "$HELPER" write-marker "$MARKER_DIR" "$DATE" ok \
         --slot "$SLOT" --run-id "$RUN_ID" --run-status "$STATUS" \
         --raw-mail-sent true --editorial-mail-sent true --mail-sent true \
-        --source-count "$SOURCES" --cited-source-count "$CITED" >>"$LOG_DIR/$DATE.log" 2>&1
+        --source-count "$SOURCES" --cited-source-count "$CITED" >>"$LOG_FILE" 2>&1
     log "success marker written: $MARKER_DIR/$DATE.ok"
     exit 0
 fi
@@ -226,7 +244,7 @@ if [ "$RAW_SENT" = "True" ] || [ "$EDIT_SENT" = "True" ]; then
     "$PYTHON_BIN" "$HELPER" write-marker "$MARKER_DIR" "$DATE" partial \
         --slot "$SLOT" --run-id "$RUN_ID" --run-status "$STATUS" \
         --raw-mail-sent "$RAW_SENT" --editorial-mail-sent "$EDIT_SENT" \
-        --mail-sent "$MAIL_SENT" --source-count "$SOURCES" --cited-source-count "$CITED" >>"$LOG_DIR/$DATE.log" 2>&1
+        --mail-sent "$MAIL_SENT" --source-count "$SOURCES" --cited-source-count "$CITED" >>"$LOG_FILE" 2>&1
     log "partial marker written: $MARKER_DIR/$DATE.partial"
     exit 0
 fi

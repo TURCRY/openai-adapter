@@ -1,13 +1,6 @@
-# Perplexica veille - root crontab fragment (Monday, Europe/Paris)
-# Deployment: replace the existing Perplexica veille block in
-# /usr/builtin/etc/crontabs/root with the six lines below.
-# The first two lines are the current schedule (03:00-07:45).
-# The last four are recovery-only slots for an existing .partial marker.
-# VEILLE_RECOVERY_ONLY=1 makes the recovery-only decision independent of
-# the wall-clock minute (a cron start at 09:00:59 still stays recovery-only).
+# Perplexica veille - root crontab fragment (Monday/Tuesday, Europe/Paris)
+# Monday: historical full-run window.
+# Tuesday: recovery-only window for the previous Monday's .partial marker.
 0 3,4,5,6 * * 1 su -s /bin/sh - nicolas -c '/volume1/home/nicolas/Docker/openai-adapter/tools/perplexica/monday_veille_wrapper.sh' >> /volume1/Web/logs/perplexica_veille.log 2>&1
 45 7 * * 1 su -s /bin/sh - nicolas -c '/volume1/home/nicolas/Docker/openai-adapter/tools/perplexica/monday_veille_wrapper.sh' >> /volume1/Web/logs/perplexica_veille.log 2>&1
-0 9 * * 1 su -s /bin/sh - nicolas -c 'VEILLE_RECOVERY_ONLY=1 /volume1/home/nicolas/Docker/openai-adapter/tools/perplexica/monday_veille_wrapper.sh' >> /volume1/Web/logs/perplexica_veille.log 2>&1
-0 12 * * 1 su -s /bin/sh - nicolas -c 'VEILLE_RECOVERY_ONLY=1 /volume1/home/nicolas/Docker/openai-adapter/tools/perplexica/monday_veille_wrapper.sh' >> /volume1/Web/logs/perplexica_veille.log 2>&1
-0 15 * * 1 su -s /bin/sh - nicolas -c 'VEILLE_RECOVERY_ONLY=1 /volume1/home/nicolas/Docker/openai-adapter/tools/perplexica/monday_veille_wrapper.sh' >> /volume1/Web/logs/perplexica_veille.log 2>&1
-0 18 * * 1 su -s /bin/sh - nicolas -c 'VEILLE_RECOVERY_ONLY=1 /volume1/home/nicolas/Docker/openai-adapter/tools/perplexica/monday_veille_wrapper.sh' >> /volume1/Web/logs/perplexica_veille.log 2>&1
+0 3,4,5,6 * * 2 su -s /bin/sh - nicolas -c '/volume1/home/nicolas/Docker/openai-adapter/tools/perplexica/monday_veille_wrapper.sh' >> /volume1/Web/logs/perplexica_veille.log 2>&1

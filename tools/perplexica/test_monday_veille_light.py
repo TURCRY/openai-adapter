@@ -5,7 +5,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from monday_veille_light import cmd_resume_candidate
+from monday_veille_light import cmd_resume_candidate, compute_business_context
 
 
 def run_candidate(marker_dir, run_root, date_str="2026-10-19"):
@@ -125,3 +125,54 @@ class ResumeCandidateTests(unittest.TestCase):
         _, fields = run_candidate(self.marker_dir, self.run_root)
         self.assertEqual(fields["action"], "already_sent")
         self.assertEqual(fields["reason"], "marker_editorial_mail_sent_true")
+
+
+class BusinessContextTests(unittest.TestCase):
+    def test_monday_uses_current_local_date(self):
+        context = compute_business_context("2026-10-19", 1, 3)
+        self.assertEqual(context["mode"], "normal")
+        self.assertEqual(context["business_date"], "2026-10-19")
+        self.assertEqual(context["today"], "2026-10-19")
+
+    def test_tuesday_early_slot_uses_previous_monday(self):
+        context = compute_business_context("2026-10-20", 2, 3)
+        self.assertEqual(context["mode"], "recovery")
+        self.assertEqual(context["business_date"], "2026-10-19")
+
+    def test_tuesday_last_recovery_slot_uses_previous_monday(self):
+        context = compute_business_context("2026-10-20", 2, 6)
+        self.assertEqual(context["mode"], "recovery")
+        self.assertEqual(context["business_date"], "2026-10-19")
+
+    def test_tuesday_after_window_is_closed(self):
+        context = compute_business_context("2026-10-20", 2, 7)
+        self.assertEqual(context["mode"], "recovery_closed")
+        self.assertEqual(context["business_date"], "2026-10-19")
+
+    def test_tuesday_before_window_is_closed(self):
+        context = compute_business_context("2026-10-20", 2, 2)
+        self.assertEqual(context["mode"], "recovery_closed")
+        self.assertEqual(context["business_date"], "2026-10-19")
+
+    def test_winter_tuesday_uses_previous_monday(self):
+        context = compute_business_context("2026-01-20", 2, 4)
+        self.assertEqual(context["mode"], "recovery")
+        self.assertEqual(context["business_date"], "2026-01-19")
+
+    def test_tuesday_after_dst_change_uses_previous_monday(self):
+        context = compute_business_context("2026-10-27", 2, 4)
+        self.assertEqual(context["mode"], "recovery")
+        self.assertEqual(context["business_date"], "2026-10-26")
+
+    def test_other_weekdays_keep_normal_mode(self):
+        context = compute_business_context("2026-10-21", 3, 3)
+        self.assertEqual(context["mode"], "normal")
+        self.assertEqual(context["business_date"], "2026-10-21")
+
+    def test_weekday_must_match_date(self):
+        with self.assertRaises(ValueError):
+            compute_business_context("2026-10-20", 1, 3)
+
+    def test_invalid_today_is_rejected(self):
+        with self.assertRaises(ValueError):
+            compute_business_context("not-a-date", 1, 3)
